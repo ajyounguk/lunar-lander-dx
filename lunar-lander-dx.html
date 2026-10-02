@@ -69,6 +69,11 @@ const CONFIG = {
   ],
   fx: {
     dustGravity: 0.12,
+    crashSlowmo: 0.25,    // time scale right after a crash (recovers to 1)
+    landSlowmo: 0.4,      // time scale right after touchdown
+    slowmoRecover: 1.2,   // how fast time returns to normal, per real second
+    shakePx: 14,          // max screen shake offset
+    debrisGravity: 70,    // debris falls faster than the ship so it stays near the crash
     bloom: true,
     scanlines: true,
   },
@@ -86,6 +91,13 @@ const SHIP = {
   rcs: [[-9, -11], [9, -11]],      // left / right attitude jets
   // Points tested against the ground: feet, legs' knees, body corners, top of cabin
   hull: [[-12, 20], [12, 20], [-11, 6], [11, 6], [-9, -11], [9, -11], [0, -16]],
+  // Outline segments, used for crash debris
+  segments: [
+    [-6,-16, 6,-16], [6,-16, 9,-11], [9,-11, 9,-4], [-9,-4, -9,-11], [-9,-11, -6,-16],
+    [-11,-4, 11,-4], [11,-4, 11,6], [11,6, -11,6], [-11,6, -11,-4],
+    [-9,2, -12,20], [9,2, 12,20], [-15,20, -9,20], [9,20, 15,20],
+    [-4,6, -6,12], [4,6, 6,12], [-6,12, 6,12],
+  ],
 };
 const DEBUG = new URLSearchParams(location.search).has("debug");
 
@@ -227,7 +239,10 @@ resize();
 /* === Camera: world → screen. Identity for now; zoom comes later === */
 const camera = { x: W/2, y: H/2, zoom: 1 };
 function applyCamera(c){
-  c.translate(W/2, H/2); c.scale(camera.zoom, camera.zoom); c.translate(-camera.x, -camera.y);
+  // Trauma-style shake: offset grows with the square of the shake amount
+  const s = effects.shake * effects.shake * CONFIG.fx.shakePx;
+  c.translate(W/2 + (Math.random()*2-1)*s, H/2 + (Math.random()*2-1)*s);
+  c.scale(camera.zoom, camera.zoom); c.translate(-camera.x, -camera.y);
 }
 
 /* === Background: stars + parallax mountains === */
@@ -316,9 +331,89 @@ function init(seed = (Math.random()*0xFFFFFFFF)>>>0){
   };
   dust.length = 0;
   thrusterParticles.length = 0;
+  debris.length = 0;
+  effects.shake = effects.flash = 0;
+  effects.timeScale = 1;
   emitAccMain = emitAccSideL = emitAccSideR = 0;
 }
-init();
+
+/* === Effects: screen shake, flash, slow motion, crash debris === */
+const effects = { shake: 0, flash: 0, timeScale: 1 };
+let debris = [];
+
+function explode(){
+  const L = lander;
+  for (const [x0, y0, x1, y1] of SHIP.segments){
+    const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+    const c = toWorld(mx, my);
+    const out = Math.atan2(c.y - L.y, c.x - L.x) + (Math.random() - 0.5) * 0.8;
+    const spd = 25 + Math.random() * 60;
+    debris.push({
+      x: c.x, y: c.y,
+      hx: (x1 - x0) / 2, hy: (y1 - y0) / 2,          // half-length vector, ship-local
+      angle: L.angle, spin: (Math.random() - 0.5) * 16,
+      vx: L.vx * 0.3 + Math.cos(out) * spd, vy: Math.sin(out) * spd - 50,
+      life: 2.5 + Math.random() * 1.5,
+    });
+  }
+  // Fireball
+  for (let i = 0; i < 90; i++){
+    const dir = Math.random() * Math.PI * 2, spd = 0.5 + Math.random() * 3.5;
+    thrusterParticles.push({
+      x: L.x + (Math.random() - 0.5) * 10, y: L.y + (Math.random() - 0.5) * 10,
+      vx: Math.cos(dir) * spd, vy: Math.sin(dir) * spd - 0.6,
+      ax: 0, ay: -0.02,
+      life: 0.35 + Math.random() * 0.6, hue: 10 + Math.random() * 40, size: 2 + Math.random() * 4,
+    });
+  }
+  effects.shake = 1;
+  effects.flash = 1;
+  effects.timeScale = CONFIG.fx.crashSlowmo;
+}
+
+function touchdownFx(pad, vy){
+  // A small jolt that scales with how hard you came down
+  effects.shake = Math.min(0.5, 0.12 + vy / CONFIG.landing.safeVy * 0.3);
+  effects.timeScale = CONFIG.fx.landSlowmo;
+  for (const [fx] of SHIP.feet) spawnDustBurst(lander.x + fx, pad.y + 1, 30, 1.6);
+}
+
+function updateDebris(dt){
+  const g = CONFIG.fx.debrisGravity;
+  for (const d of debris){
+    d.vy += g * dt;
+    d.x += d.vx * dt; d.y += d.vy * dt;
+    d.angle += d.spin * dt;
+    d.life -= dt;
+    // Bounce off the ground, losing energy
+    const gy = surfaceY(d.x);
+    if (d.y > gy){
+      d.y = gy;
+      if (d.vy > 0) d.vy *= -0.35;
+      d.vx *= 0.6; d.spin *= 0.6;
+    }
+  }
+  debris = debris.filter(d => d.life > 0);
+}
+
+function drawDebris(c){
+  c.save();
+  c.strokeStyle = "#0f0"; c.lineWidth = 1.4; c.lineCap = "round";
+  for (const d of debris){
+    const cos = Math.cos(d.angle), sin = Math.sin(d.angle);
+    const ex = d.hx * cos - d.hy * sin, ey = d.hx * sin + d.hy * cos;
+    c.globalAlpha = Math.min(1, d.life);
+    c.beginPath(); c.moveTo(d.x - ex, d.y - ey); c.lineTo(d.x + ex, d.y + ey); c.stroke();
+  }
+  c.restore();
+}
+
+// Shake and slow motion recover in real time, so they feel the same at any frame rate
+function updateEffects(realDt){
+  effects.shake = Math.max(0, effects.shake - realDt * 1.6);
+  effects.flash = Math.max(0, effects.flash - realDt * 4);
+  effects.timeScale = Math.min(1, effects.timeScale + realDt * CONFIG.fx.slowmoRecover);
+}
 
 /* === Particles === */
 function spawnDustBurst(x, y, count, strength){
@@ -671,9 +766,16 @@ function renderSceneToBuffer(){
   drawPads(bctx);
   drawDust(bctx);                 // over ground, under lander
   if (game.state !== "crashed") drawLander(bctx);
+  drawDebris(bctx);
   drawThrusterParticles(bctx);    // on top for glow
   drawPopups(bctx);
   bctx.restore();
+
+  // Crash flash
+  if (effects.flash > 0){
+    bctx.fillStyle = `rgba(220,255,220,${effects.flash * 0.45})`;
+    bctx.fillRect(0, 0, W, H);
+  }
 
   // HUD pass (screen space)
   if (run && game.state !== "title" && game.state !== "gameover") drawHUD(bctx);
@@ -795,6 +897,7 @@ function update(dt){
     lander.y = pad.y - SHIP_HALF_HEIGHT;
     lander.angle = 0; lander.spin = 0;
     scoreLanding(pad, lander.touchdownVy, tilt);
+    touchdownFx(pad, lander.touchdownVy);
   } else {
     setState("crashed");
     lander.crashReason = !pad ? (padL || padR ? "Hit the edge of the pad" : "Crashed into the terrain")
@@ -805,6 +908,7 @@ function update(dt){
     run.fuelLost = Math.min(lander.fuel, F.crashPenalty);
     run.fuel = Math.max(0, lander.fuel - F.crashPenalty);
     run.over = run.fuel < F.minToFly;
+    explode();
   }
   // Dust kick-up at contact point
   const impact = Math.min(3.0, Math.hypot(lander.vx, lander.vy)/12 + (soft? 1.0 : 2.5));
@@ -836,6 +940,7 @@ function step(dt){
   if (game.state === "playing") update(dt);
   updateDust(dt);
   updateThrusterParticles(dt);
+  updateDebris(dt);
   updatePopups(dt);
 }
 
@@ -846,8 +951,10 @@ let lastTime = performance.now(), accumulator = 0;
 const dbg = { frames: 0, steps: 0, fps: 0, sps: 0, since: performance.now() };
 
 function frame(now){
-  accumulator += Math.min(MAX_FRAME, (now - lastTime) / 1000);
+  const realDt = Math.min(MAX_FRAME, (now - lastTime) / 1000);
   lastTime = now;
+  if (game.state !== "paused") updateEffects(realDt);
+  accumulator += realDt * effects.timeScale;
   while (accumulator >= STEP){
     step(STEP);
     accumulator -= STEP;
@@ -880,6 +987,8 @@ function drawDebug(now){
   lines.forEach((l,i) => ctx.fillText(l, 18, H-17-(lines.length-i)*13));
   ctx.restore();
 }
+// Start: build a level for the title screen backdrop, then run the loop
+init();
 requestAnimationFrame(frame);
 </script>
 </body>
