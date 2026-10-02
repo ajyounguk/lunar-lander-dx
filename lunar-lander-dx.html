@@ -88,6 +88,28 @@ const DEBUG = new URLSearchParams(location.search).has("debug");
 const game = { state: "title", stateTime: 0 };
 function setState(s){ game.state = s; game.stateTime = 0; }
 
+/* === High scores: top 5 in localStorage. Storage can be blocked or throw
+   (private mode, disabled site data), so the game never depends on it. === */
+const HS_KEY = "moonLanderDX.highScores", HS_MAX = 5;
+function loadHighScores(){
+  try {
+    const list = JSON.parse(localStorage.getItem(HS_KEY) || "[]");
+    return Array.isArray(list) ? list.filter(e => Number.isFinite(e.score)).slice(0, HS_MAX) : [];
+  } catch { return []; }
+}
+let highScores = loadHighScores();
+// Returns the 1-based rank if the score made the table, else 0
+function recordHighScore(score, level){
+  if (score <= 0) return 0;
+  const entry = { score, level, date: new Date().toISOString().slice(0, 10) };
+  const list = [...highScores, entry].sort((a, b) => b.score - a.score).slice(0, HS_MAX);
+  const rank = list.indexOf(entry) + 1;
+  if (!rank) return 0;
+  highScores = list;
+  try { localStorage.setItem(HS_KEY, JSON.stringify(list)); } catch {}
+  return rank;
+}
+
 // One run = a sequence of levels sharing a score and a fuel tank
 let run = null, level = null;
 function levelParams(n){
@@ -114,6 +136,11 @@ function startLevel(){
   setState("playing");
 }
 
+function endRun(){
+  run.rank = recordHighScore(run.score, run.level);
+  setState("gameover");
+}
+
 function confirmPressed(){
   // Short delay on result screens so a held/mashed key doesn't skip them
   const ready = game.stateTime > 0.6;
@@ -121,9 +148,12 @@ function confirmPressed(){
     case "title": startRun(); break;
     case "paused": setState("playing"); break;
     case "landed": if (ready){ run.level++; startLevel(); } break;
-    case "crashed": if (ready){ run.over ? setState("gameover") : startLevel(); } break;
+    case "crashed": if (ready){ run.over ? endRun() : startLevel(); } break;
     case "gameover": if (ready) setState("title"); break;
   }
+}
+function quitRun(){
+  if (game.state === "paused") endRun();
 }
 function togglePause(){
   if (game.state === "playing") setState("paused");
@@ -138,6 +168,7 @@ document.addEventListener("keydown", e => {
   if (!e.repeat){
     if (e.code === "Space" || e.code === "Enter") confirmPressed();
     if (e.code === "KeyP" || e.code === "Escape") togglePause();
+    if (e.code === "KeyQ") quitRun();
   }
   if (audioCtx.state === "suspended") audioCtx.resume(); // unlock audio
 });
@@ -513,8 +544,10 @@ function drawPopups(c){
 // Centred message panel for title / pause / result screens
 function drawPanel(c, title, lines, titleColor="#0f0"){
   const blink = Math.floor(performance.now()/500) % 2 === 0;
-  const w = 340, h = 70 + lines.length*18, x = (W-w)/2, y = (H-h)/2 - 30;
   c.save();
+  c.font = "13px monospace";
+  const textW = Math.max(...lines.map(l => c.measureText(l.replace(/^>\s*/, "")).width));
+  const w = Math.max(340, Math.ceil(textW) + 48), h = 70 + lines.length*18, x = (W-w)/2, y = (H-h)/2 - 30;
   c.fillStyle = "rgba(0,12,0,0.82)"; roundRectPath(c, x, y, w, h, 8); c.fill();
   c.strokeStyle = "rgba(0,255,0,0.6)"; c.lineWidth = 2; roundRectPath(c, x, y, w, h, 8); c.stroke();
   c.textAlign = "center"; c.textBaseline = "top";
@@ -530,6 +563,13 @@ function drawPanel(c, title, lines, titleColor="#0f0"){
   c.restore();
 }
 
+function highScoreLines(){
+  if (!highScores.length) return [];
+  return ["HIGH SCORES",
+    ...highScores.map((e, i) => `${i+1}. ${String(e.score).padStart(6, " ")}   level ${String(e.level).padEnd(3)} ${e.date || ""}`),
+    ""];
+}
+
 function drawOverlay(c){
   const ready = game.stateTime > 0.6;
   switch (game.state){
@@ -542,11 +582,12 @@ function drawOverlay(c){
         "Up / W: thrust   Left/Right or A/D: rotate",
         "P / Esc: pause",
         "",
+        ...highScoreLines(),
         "> PRESS SPACE TO START",
       ]);
       break;
     case "paused":
-      drawPanel(c, "PAUSED", ["", "> SPACE OR P TO RESUME"]);
+      drawPanel(c, "PAUSED", ["", "Q: quit this run", "", "> SPACE OR P TO RESUME"]);
       break;
     case "landed": {
       const r = run.last;
@@ -572,6 +613,7 @@ function drawOverlay(c){
       drawPanel(c, "GAME OVER", [
         `Final score ${run.score}`,
         `Reached level ${run.level}`,
+        run.rank === 1 ? "NEW HIGH SCORE!" : run.rank ? `You placed #${run.rank} on the high score table` : "",
         "",
         ready ? "> PRESS SPACE" : "",
       ], "#f44");
