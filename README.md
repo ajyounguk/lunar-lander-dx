@@ -6,6 +6,13 @@ generated terrain, and a fuel tank that has to last the whole run.
 No install, no build step, no dependencies. Open `lunar-lander-dx.html` in a browser and play.
 It works on desktop and on phones/tablets (landscape).
 
+![Coming in to land on a x2 pad, with the camera zoomed in and the HUD showing LANDING OK](docs/screenshots/landing.png)
+
+| | |
+|---|---|
+| ![Title screen over generated terrain with x1, x2 and x5 landing pads](docs/screenshots/title.png) | ![Mid-flight on level 3 with the engine firing and the flight-data HUD](docs/screenshots/flight.png) |
+| ![Crash: the lander breaks apart in a fireball and the mission failed panel shows why](docs/screenshots/crash.png) | |
+
 ## How to play
 
 Land on a pad **slowly**, **upright** and **with both feet on the pad**.
@@ -55,3 +62,6 @@ level, thrust, fuel, crash penalty, landing limits, pad sizes, camera zoom and e
 value, then reload the page.
 
 Add `?debug` to the URL for an overlay with FPS, physics rate, position, speed and level settings.
+
+To regenerate the README screenshots, open the game with `?shot=flight`, `?shot=landing` or
+`?shot=crash`. Each one stages a fixed scene and freezes it.
