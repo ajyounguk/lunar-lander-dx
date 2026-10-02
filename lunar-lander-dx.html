@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Moon Lander DX</title>
 <style>
-  html, body { margin:0; height:100%; background:#000; overflow:hidden; }
+  html, body { margin:0; height:100%; background:#000; overflow:hidden; overscroll-behavior:none;
+    -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; -webkit-tap-highlight-color:transparent; }
   body { display:flex; align-items:center; justify-content:center; }
   canvas { display:block; background:#000; touch-action:none; }
 </style>
@@ -211,10 +212,69 @@ document.addEventListener("keyup", e => keys[e.code] = false);
 // Drop held keys and pause when the window loses focus, otherwise keys stay stuck down
 function onFocusLost(){
   for (const k in keys) keys[k] = false;
+  touch.pointers.clear(); refreshTouch();
   if (game.state === "playing") setState("paused");
 }
 window.addEventListener("blur", onFocusLost);
 document.addEventListener("visibilitychange", () => { if (document.hidden) onFocusLost(); });
+
+/* === Touch controls: on-screen buttons in logical coordinates. Shown on touch
+   devices (coarse pointer) or as soon as a touch is seen. Multi-touch, and a finger
+   can slide between the rotate buttons. === */
+const touch = {
+  enabled: !!(window.matchMedia && matchMedia("(pointer: coarse)").matches),
+  left: false, right: false, thrust: false,
+  pointers: new Map(),   // pointerId → button name
+};
+const TOUCH_BTNS = {
+  left:   { x: 84,     y: H - 84, r: 48, label: "◀" },
+  right:  { x: 196,    y: H - 84, r: 48, label: "▶" },
+  thrust: { x: W - 104, y: H - 94, r: 64, label: "THRUST" },
+  pause:  { x: W / 2,  y: 40,     r: 22, label: "II" },
+  quit:   { x: W / 2,  y: H - 70, r: 34, label: "QUIT" },
+};
+function activeButtons(){
+  if (game.state === "playing") return ["left", "right", "thrust", "pause"];
+  if (game.state === "paused") return ["quit"];
+  return [];
+}
+function toLogical(e){
+  const r = canvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / r.width * W, y: (e.clientY - r.top) / r.height * H };
+}
+function buttonAt(p){
+  // A little larger than drawn, so near-misses still count
+  return activeButtons().find(n => Math.hypot(p.x - TOUCH_BTNS[n].x, p.y - TOUCH_BTNS[n].y) <= TOUCH_BTNS[n].r * 1.2) || null;
+}
+function refreshTouch(){
+  touch.left = touch.right = touch.thrust = false;
+  for (const b of touch.pointers.values()) if (b === "left" || b === "right" || b === "thrust") touch[b] = true;
+}
+window.addEventListener("pointerdown", e => {
+  ensureAudio();
+  if (e.pointerType === "touch") touch.enabled = true;
+  const btn = buttonAt(toLogical(e));
+  if (btn === "pause"){ togglePause(); return; }
+  if (btn === "quit"){ quitRun(); return; }
+  if (btn && touch.enabled){
+    e.preventDefault();
+    touch.pointers.set(e.pointerId, btn);
+    refreshTouch();
+    return;
+  }
+  // Anywhere else: tap/click advances menus and result screens
+  if (game.state !== "playing") confirmPressed();
+}, { passive: false });
+window.addEventListener("pointermove", e => {
+  if (!touch.pointers.has(e.pointerId)) return;
+  const btn = buttonAt(toLogical(e));
+  touch.pointers.set(e.pointerId, btn === "left" || btn === "right" || btn === "thrust" ? btn : null);
+  refreshTouch();
+});
+for (const type of ["pointerup", "pointercancel"]){
+  window.addEventListener(type, e => { touch.pointers.delete(e.pointerId); refreshTouch(); });
+}
+const isPortrait = () => touch.enabled && window.innerHeight > window.innerWidth;
 
 /* === Audio: all synthesised with WebAudio. The context is created on the first
    key press or tap, since browsers block audio until the user interacts. === */
@@ -332,7 +392,10 @@ function resize(){
   grad.addColorStop(1, "rgba(0,0,0,0.55)");
   vctx.fillStyle = grad; vctx.fillRect(0,0,W,H);
 }
-window.addEventListener("resize", resize);
+window.addEventListener("resize", () => {
+  resize();
+  if (isPortrait() && game.state === "playing") setState("paused");
+});
 resize();
 
 /* === Camera: world → screen. Zooms in on the ship near the ground, like the arcade original === */
@@ -851,7 +914,33 @@ function drawHUD(c){
 }
 
 function controlHint(){
-  return "↑ / W: THRUST     ← → / A D: ROTATE     P: PAUSE     M: SOUND";
+  return touch.enabled ? "◀ ▶ ROTATE          HOLD THRUST TO FIRE ENGINE"
+    : "↑ / W: THRUST     ← → / A D: ROTATE     P: PAUSE     M: SOUND";
+}
+
+function drawTouchButtons(c){
+  if (!touch.enabled) return;
+  c.save();
+  c.textAlign = "center"; c.textBaseline = "middle";
+  for (const name of activeButtons()){
+    const b = TOUCH_BTNS[name], on = touch[name];
+    c.beginPath(); c.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+    c.fillStyle = on ? "rgba(0,255,0,0.28)" : "rgba(0,40,0,0.35)"; c.fill();
+    c.strokeStyle = on ? "#0f0" : "rgba(0,255,0,0.5)"; c.lineWidth = 2; c.stroke();
+    c.fillStyle = on ? "#cfc" : "#0f0";
+    c.font = `bold ${b.label.length > 2 ? 14 : 22}px monospace`;
+    c.fillText(b.label, b.x, b.y + 1);
+  }
+  c.restore();
+}
+
+function drawPortraitHint(c){
+  c.save();
+  c.fillStyle = "rgba(0,0,0,0.88)"; c.fillRect(0, 0, W, H);
+  c.fillStyle = "#0f0"; c.textAlign = "center"; c.textBaseline = "middle";
+  c.font = "bold 56px monospace"; c.fillText("⟳", W/2, H/2 - 60);
+  c.font = "bold 40px monospace"; c.fillText("ROTATE TO LANDSCAPE", W/2, H/2 + 20);
+  c.restore();
 }
 
 function drawPopups(c){
@@ -883,7 +972,9 @@ function drawPanel(c, title, lines, titleColor="#0f0"){
     const isPrompt = l.startsWith(">");
     if (isPrompt && !blink) return;
     c.fillStyle = isPrompt ? "#ff0" : "#0f0";
-    c.fillText(isPrompt ? l.slice(1).trim() : l, W/2, y+52+i*18);
+    let text = isPrompt ? l.slice(1).trim() : l;
+    if (isPrompt && touch.enabled) text = text.replace("SPACE OR P", "TAP").replace("PRESS SPACE", "TAP");
+    c.fillText(text, W/2, y+52+i*18);
   });
   c.restore();
 }
@@ -904,15 +995,15 @@ function drawOverlay(c){
         "Narrow pads score more and refuel you more.",
         "Fuel carries over. Run dry and it's game over.",
         "",
-        "Up / W: thrust   Left/Right or A/D: rotate",
-        "P / Esc: pause   M: sound on/off",
+        ...(touch.enabled ? ["Left buttons: rotate   Right button: thrust"]
+          : ["Up / W: thrust   Left/Right or A/D: rotate", "P / Esc: pause   M: sound on/off"]),
         "",
         ...highScoreLines(),
         "> PRESS SPACE TO START",
       ]);
       break;
     case "paused":
-      drawPanel(c, "PAUSED", ["", "Q: quit this run", "", "> SPACE OR P TO RESUME"]);
+      drawPanel(c, "PAUSED", ["", touch.enabled ? "QUIT button: end this run" : "Q: quit this run", "", "> SPACE OR P TO RESUME"]);
       break;
     case "landed": {
       const r = run.last;
@@ -975,6 +1066,7 @@ function renderSceneToBuffer(){
   // HUD pass (screen space)
   if (run && game.state !== "title" && game.state !== "gameover") drawHUD(bctx);
   drawOverlay(bctx);
+  drawTouchButtons(bctx);
   if (toast.life > 0){
     bctx.save();
     bctx.globalAlpha = Math.min(1, toast.life * 2);
@@ -983,6 +1075,7 @@ function renderSceneToBuffer(){
     bctx.fillStyle = "#0f0"; bctx.fillText(toast.text, W/2, H-63);
     bctx.restore();
   }
+  if (isPortrait()) drawPortraitHint(bctx);
 }
 
 /* === Post FX: bloom, vignette, scanlines, rounded border, title badge === */
@@ -1044,8 +1137,8 @@ function update(dt){
   const hasFuel = lander.fuel > 0;
 
   // Rotation: ease the spin rate towards the target so taps give fine control
-  const rotL = hasFuel && !!(keys["ArrowLeft"] || keys["KeyA"]);
-  const rotR = hasFuel && !!(keys["ArrowRight"] || keys["KeyD"]);
+  const rotL = hasFuel && !!(keys["ArrowLeft"] || keys["KeyA"] || touch.left);
+  const rotR = hasFuel && !!(keys["ArrowRight"] || keys["KeyD"] || touch.right);
   const targetSpin = (rotR - rotL) * P.rotateSpeed;
   const maxDelta = P.rotateAccel * dt;
   lander.spin += Math.max(-maxDelta, Math.min(maxDelta, targetSpin - lander.spin));
@@ -1058,7 +1151,7 @@ function update(dt){
   }
 
   // Main engine pushes along the ship's "up"
-  const mainOn = hasFuel && !!(keys["ArrowUp"] || keys["KeyW"]);
+  const mainOn = hasFuel && !!(keys["ArrowUp"] || keys["KeyW"] || touch.thrust);
   if (mainOn){
     lander.vx += Math.sin(lander.angle) * P.thrust*dt;
     lander.vy -= Math.cos(lander.angle) * P.thrust*dt;
