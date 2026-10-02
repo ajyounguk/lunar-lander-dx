@@ -30,6 +30,7 @@ const CONFIG = {
     landingPerMult: 50,
     crashPenalty: 250,    // extra fuel lost when you crash (roughly one level's worth)
     minToFly: 40,         // below this after a crash, the game is over
+    lowWarning: 150,      // flash LOW FUEL below this
   },
   scoring: {
     base: 100,            // points per landing, before the pad multiplier
@@ -673,23 +674,90 @@ function drawGauge(c, x,y,r, value, min,max, label, col, safeRange, fuelMode=fal
   c.restore();
 }
 
+// Colour for a reading against a landing limit: green well inside, amber near, red over
+function limitColor(value, limit){
+  return value <= limit * 0.7 ? "#0f0" : value <= limit ? "#ff0" : "#f44";
+}
+
 function drawHUD(c){
-  const safeVy = CONFIG.landing.safeVy;
-  drawGauge(c, W-120, 82, 26, Math.max(0, lander.fuel), 0, CONFIG.fuel.max, "FUEL", "#0f0", null, true);
-  drawGauge(c, W-52, 82, 26, lander.vy, -180, 180, "V-VEL", "#ff0", {min:-safeVy, max:safeVy});
-  // Controls + data
-  c.fillStyle="#0f0"; c.font="bold 14px monospace"; c.textAlign="left"; c.textBaseline="alphabetic";
-  c.fillText(`LEVEL ${run.level}   SCORE ${String(run.score).padStart(6, "0")}`, 24, 36);
-  c.font="12px monospace";
-  const deg = lander.angle * 180 / Math.PI;
-  c.fillText(`Fuel: ${Math.max(0, lander.fuel).toFixed(0)}   VX: ${lander.vx.toFixed(0)}   VY: ${lander.vy.toFixed(0)}   ANG: ${deg.toFixed(0)}°`, 24, 54);
-  if (level.wind){
-    const arrow = level.wind > 0 ? "→" : "←";
-    c.fillStyle = "#8cf";
-    c.fillText(`WIND ${arrow} ${Math.abs(level.wind).toFixed(0)}`, 24, 70);
+  const L = CONFIG.landing, F = CONFIG.fuel;
+  const blink = Math.floor(performance.now() / 250) % 2 === 0;
+  const alt = Math.max(0, surfaceY(lander.x) - (lander.y + SHIP_HALF_HEIGHT));
+  const tilt = Math.abs(lander.angle) * 180 / Math.PI;
+  const down = Math.max(0, lander.vy);
+
+  // Round gauges, top right
+  drawGauge(c, W-120, 82, 26, Math.max(0, lander.fuel), 0, F.max, "FUEL", "#0f0", null, true);
+  drawGauge(c, W-52, 82, 26, lander.vy, -180, 180, "V-VEL", "#ff0", {min:-L.safeVy, max:L.safeVy});
+
+  // Flight data panel, top left
+  const x = 24, y = 22, w = 210;
+  c.save();
+  c.fillStyle = "rgba(0,0,0,0.45)"; roundRectPath(c, x-8, y, w, 152, 6); c.fill();
+  c.textBaseline = "alphabetic"; c.textAlign = "left";
+  c.fillStyle = "#0f0"; c.font = "bold 14px monospace";
+  c.fillText(`LEVEL ${run.level}`, x, y+20);
+  c.textAlign = "right";
+  c.fillText(String(run.score).padStart(6, "0"), x+w-18, y+20);
+
+  const rows = [
+    ["ALT",   `${alt.toFixed(0)}`, "#0f0"],
+    ["H-SPD", `${Math.abs(lander.vx).toFixed(0)} ${lander.vx > 1 ? "→" : lander.vx < -1 ? "←" : " "}`, limitColor(Math.abs(lander.vx), L.safeVx)],
+    ["V-SPD", `${Math.abs(lander.vy).toFixed(0)} ${lander.vy > 1 ? "↓" : lander.vy < -1 ? "↑" : " "}`, limitColor(down, L.safeVy)],
+    ["ANGLE", `${(lander.angle * 180 / Math.PI).toFixed(0)}°`, limitColor(tilt, L.safeAngle)],
+  ];
+  c.font = "12px monospace";
+  rows.forEach(([label, value, col], i) => {
+    const ry = y + 42 + i * 16;
+    c.textAlign = "left"; c.fillStyle = "#0a0"; c.fillText(label, x, ry);
+    c.textAlign = "right"; c.fillStyle = col; c.fillText(value, x + 110, ry);
+  });
+
+  // Landing check, shown when close to the ground
+  if (alt < 120 && game.state === "playing"){
+    const problems = [
+      down > L.safeVy && "TOO FAST",
+      Math.abs(lander.vx) > L.safeVx && "DRIFTING",
+      tilt > L.safeAngle && "TILTED",
+    ].filter(Boolean);
+    c.textAlign = "left"; c.font = "bold 12px monospace";
+    c.fillStyle = problems.length ? (blink ? "#f44" : "#800") : "#0f0";
+    c.fillText(problems.length ? `LANDING: ${problems[0]}` : "LANDING OK", x + 122, y + 66);
   }
-  c.fillStyle = "#0a0";
-  c.fillText("Up: thrust   Left/Right: rotate   P: pause", 24, H-24);
+
+  // Fuel bar
+  const fy = y + 116, fw = w - 60, frac = Math.max(0, lander.fuel) / F.max;
+  const fuelCol = lander.fuel < F.lowWarning ? "#f44" : frac < 0.3 ? "#ff0" : "#0f0";
+  c.textAlign = "left"; c.fillStyle = "#0a0"; c.font = "12px monospace";
+  c.fillText("FUEL", x, fy + 9);
+  c.strokeStyle = "#0a0"; c.lineWidth = 1; c.strokeRect(x + 40, fy, fw, 10);
+  c.fillStyle = fuelCol; c.fillRect(x + 41, fy + 1, (fw - 2) * Math.min(1, frac), 8);
+  c.textAlign = "right"; c.fillStyle = fuelCol;
+  c.fillText(Math.max(0, lander.fuel).toFixed(0), x + w - 18, fy + 27);
+
+  if (level.wind){
+    c.textAlign = "left"; c.fillStyle = "#8cf";
+    c.fillText(`WIND ${level.wind > 0 ? "→" : "←"} ${Math.abs(level.wind).toFixed(0)}`, x, fy + 27);
+  }
+
+  // Low fuel warning, centre top
+  if (game.state === "playing" && lander.fuel < F.lowWarning && blink){
+    c.textAlign = "center"; c.font = "bold 18px monospace"; c.fillStyle = "#f44";
+    c.fillText(lander.fuel <= 0 ? "OUT OF FUEL" : "LOW FUEL", W/2, 48);
+  }
+
+  // Control hints: bright at the start of each level, then dim
+  const t = game.state === "playing" ? game.stateTime : 99;
+  const hintAlpha = t < 4 ? 1 : t < 5 ? 1 - (t - 4) * 0.7 : 0.3;
+  c.globalAlpha = hintAlpha;
+  c.textAlign = "center"; c.font = t < 5 ? "bold 14px monospace" : "12px monospace";
+  c.fillStyle = "#0f0";
+  c.fillText(controlHint(), W/2, H-24);
+  c.restore();
+}
+
+function controlHint(){
+  return "↑ / W: THRUST     ← → / A D: ROTATE     P: PAUSE";
 }
 
 function drawPopups(c){
