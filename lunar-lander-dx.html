@@ -11,13 +11,35 @@
 <body>
 <canvas id="game" width="640" height="480"></canvas>
 <script>
-/* === Config === */
+/* === Config: all tuning numbers live here (distances in px, time in seconds) === */
+const CONFIG = {
+  physics: {
+    stepHz: 120,          // fixed simulation rate, independent of screen refresh
+    gravity: 14.4,        // px/s²
+    thrust: 43.2,         // main engine, px/s²
+    sideThrust: 21.6,     // side engines, px/s²
+  },
+  fuel: {
+    start: 200,
+    mainBurn: 24,         // units/s
+    sideBurn: 15,         // units/s
+  },
+  landing: {
+    safeVy: 54,           // max downward speed, px/s
+    safeVx: 36,           // max sideways speed, px/s
+  },
+  start: { y: 50, maxVx: 15 },
+  fx: {
+    dustGravity: 0.12,
+    starDrift: 12,        // px/s
+  },
+};
+
 const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
 const W = canvas.width, H = canvas.height, GROUND_Y = H - 40;
-const GRAVITY = 0.004, THRUST = 0.012, SIDE_THRUST = 0.006;
-const SAFE_VY = 0.9, SAFE_VX = 0.6;
 const PAD_W = 60, PAD_H = 8, PAD_X = W/2 - PAD_W/2, PAD_Y = GROUND_Y - PAD_H;
 const SHIP_HALF_HEIGHT = 20;
+const DEBUG = new URLSearchParams(location.search).has("debug");
 
 /* === Input === */
 const keys = Object.create(null);
@@ -75,9 +97,9 @@ let emitAccMain = 0, emitAccSideL = 0, emitAccSideR = 0;
 
 function init(){
   lander = {
-    x: W/2, y: 50,
-    vx: (Math.random()-0.5)*0.5, vy: 0,
-    fuel: 200, alive: true, landed: false
+    x: W/2, y: CONFIG.start.y,
+    vx: (Math.random()*2-1)*CONFIG.start.maxVx, vy: 0,
+    fuel: CONFIG.fuel.start, alive: true, landed: false
   };
   dust.length = 0;
   thrusterParticles.length = 0;
@@ -99,7 +121,7 @@ function spawnDustBurst(x, y, count, strength){
 }
 function updateDust(dt){
   for(const p of dust){
-    p.vy += GRAVITY*30 * dt; // heavier gravity feel for dust
+    p.vy += CONFIG.fx.dustGravity * dt; // heavier gravity feel for dust
     p.x += p.vx * dt * 60;
     p.y += p.vy * dt * 60;
     p.life -= dt;
@@ -233,12 +255,8 @@ function drawRoundedRectFill(c, x, y, w, h, r){
 function drawBackground(c){
   c.fillStyle="#000"; c.fillRect(0,0,W,H);
   c.fillStyle="#0f0";
-  for(const s of stars){
-    c.fillRect(s.x,s.y,1,1);
-    s.x -= s.speed*0.2; if(s.x<0){s.x=W; s.y=Math.random()*H;}
-  }
+  for(const s of stars) c.fillRect(s.x,s.y,1,1);
   mountains.forEach((m,i)=>{
-    mountainOffsets[i]=(mountainOffsets[i]+m.speed)%m.layer.period;
     const off=mountainOffsets[i];
     c.fillStyle=m.fill; c.strokeStyle=m.stroke; c.lineWidth=1;
     for(let tile=0; tile<2; tile++){
@@ -312,12 +330,13 @@ function drawGauge(c, x,y,r, value, min,max, label, col, safeRange, fuelMode=fal
 
 function drawHUD(c){
   // Gauges flanking the pad
-  drawGauge(c, PAD_X-40, PAD_Y-30, 26, Math.max(0, lander.fuel), 0, 200, "FUEL", "#0f0", null, true);
-  drawGauge(c, PAD_X+PAD_W+40, PAD_Y-30, 26, lander.vy, -3, 3, "V-VEL", "#ff0", {min:-SAFE_VY, max:SAFE_VY});
+  const safeVy = CONFIG.landing.safeVy;
+  drawGauge(c, PAD_X-40, PAD_Y-30, 26, Math.max(0, lander.fuel), 0, CONFIG.fuel.start, "FUEL", "#0f0", null, true);
+  drawGauge(c, PAD_X+PAD_W+40, PAD_Y-30, 26, lander.vy, -180, 180, "V-VEL", "#ff0", {min:-safeVy, max:safeVy});
   // Controls + data
   c.fillStyle="#0f0"; c.font="12px monospace";
   c.fillText("Arrows: thrust   Space: reset", 12, 18);
-  c.fillText(`Fuel: ${Math.max(0, lander.fuel).toFixed(0)}   VX: ${lander.vx.toFixed(2)}   VY: ${lander.vy.toFixed(2)}`, 12, 34);
+  c.fillText(`Fuel: ${Math.max(0, lander.fuel).toFixed(0)}   VX: ${lander.vx.toFixed(0)}   VY: ${lander.vy.toFixed(0)}`, 12, 34);
   // Outcome text
   if(lander.landed) c.fillText("MISSION SUCCESS", W/2-60, H/2);
   else if(!lander.alive) c.fillText("MISSION FAILED", W/2-60, H/2);
@@ -385,32 +404,41 @@ function postFXDraw(){
 }
 
 /* === Physics === */
-let lastTime = performance.now();
+function updateBackground(dt){
+  for(const s of stars){
+    s.x -= s.speed*CONFIG.fx.starDrift*dt;
+    if(s.x<0){ s.x=W; s.y=Math.random()*H; }
+  }
+  mountains.forEach((m,i)=>{
+    mountainOffsets[i]=(mountainOffsets[i]+m.speed*60*dt)%m.layer.period;
+  });
+}
+
 function update(dt){
-  // Move stars (already handled in draw), mountains offset handled in draw
   if (!lander.alive || lander.landed) return;
+  const P = CONFIG.physics, F = CONFIG.fuel;
 
   const now = performance.now();
   let mainOn=false, leftOn=false, rightOn=false;
 
   // Controls
   if (keys["ArrowDown"] && lander.fuel > 0){
-    lander.vy -= THRUST;
-    lander.fuel = Math.max(0, lander.fuel - 0.4);
+    lander.vy -= P.thrust*dt;
+    lander.fuel = Math.max(0, lander.fuel - F.mainBurn*dt);
     mainOn = true;
     if (now - lastMainSound > 90){ playThrust(110, 0.12); lastMainSound = now; }
   }
   // Inverted horizontal: Left => move right, left engine fires (exhaust left)
   if (keys["ArrowLeft"] && lander.fuel > 0){
-    lander.vx += SIDE_THRUST;
-    lander.fuel = Math.max(0, lander.fuel - 0.25);
+    lander.vx += P.sideThrust*dt;
+    lander.fuel = Math.max(0, lander.fuel - F.sideBurn*dt);
     leftOn = true;
     if (now - lastSideSound > 120){ playThrust(220, 0.08); lastSideSound = now; }
   }
   // Right => move left, right engine fires (exhaust right)
   if (keys["ArrowRight"] && lander.fuel > 0){
-    lander.vx -= SIDE_THRUST;
-    lander.fuel = Math.max(0, lander.fuel - 0.25);
+    lander.vx -= P.sideThrust*dt;
+    lander.fuel = Math.max(0, lander.fuel - F.sideBurn*dt);
     rightOn = true;
     if (now - lastSideSound > 120){ playThrust(220, 0.08); lastSideSound = now; }
   }
@@ -419,9 +447,9 @@ function update(dt){
   emitThruster(dt, mainOn, leftOn, rightOn);
 
   // Gravity and integrate
-  lander.vy += GRAVITY;
-  lander.x += lander.vx;
-  lander.y += lander.vy;
+  lander.vy += P.gravity*dt;
+  lander.x += lander.vx*dt;
+  lander.y += lander.vy*dt;
 
   // Bounds
   if (lander.x < 10){ lander.x = 10; lander.vx = 0; }
@@ -432,7 +460,8 @@ function update(dt){
   const onPadX = lander.x > PAD_X && lander.x < PAD_X + PAD_W;
 
   if (!endedOnce && ((shipBottom >= PAD_Y && onPadX) || shipBottom >= GROUND_Y)){
-    const soft = (Math.abs(lander.vx) <= SAFE_VX && lander.vy <= SAFE_VY && onPadX);
+    const L = CONFIG.landing;
+    const soft = (Math.abs(lander.vx) <= L.safeVx && lander.vy <= L.safeVy && onPadX);
     if (soft){
       lander.landed = true;
       lander.vx = 0; lander.vy = 0;
@@ -441,31 +470,59 @@ function update(dt){
       lander.alive = false;
     }
     // Dust kick-up at contact point
-    const impact = Math.min(3.0, Math.sqrt(lander.vx*lander.vx + lander.vy*lander.vy)*5 + (soft? 1.0 : 2.5));
+    const impact = Math.min(3.0, Math.hypot(lander.vx, lander.vy)/12 + (soft? 1.0 : 2.5));
     const contactX = lander.x, contactY = Math.min(PAD_Y, GROUND_Y);
     spawnDustBurst(contactX, contactY+2, 24 + Math.floor(impact*18), 1.2 + impact*0.8);
     endedOnce = true;
   }
 }
 
-function updateAll(dt){
+function step(dt){
   update(dt);
+  updateBackground(dt);
   updateDust(dt);
   updateThrusterParticles(dt);
 }
 
-/* === Frame loop === */
-function frame(){
-  const now = performance.now();
-  const dt = Math.min(0.033, (now - lastTime) / 1000); // clamp dt
-  lastTime = now;
+/* === Frame loop: fixed-timestep simulation, render once per display frame === */
+const STEP = 1 / CONFIG.physics.stepHz;
+const MAX_FRAME = 0.25;  // after a stall (tab switch), don't try to catch up more than this
+let lastTime = performance.now(), accumulator = 0;
+const dbg = { frames: 0, steps: 0, fps: 0, sps: 0, since: performance.now() };
 
-  updateAll(dt);
+function frame(now){
+  accumulator += Math.min(MAX_FRAME, (now - lastTime) / 1000);
+  lastTime = now;
+  while (accumulator >= STEP){
+    step(STEP);
+    accumulator -= STEP;
+    dbg.steps++;
+  }
   renderSceneToBuffer();
   postFXDraw();
+  if (DEBUG) drawDebug(now);
   requestAnimationFrame(frame);
 }
-frame();
+
+function drawDebug(now){
+  dbg.frames++;
+  if (now - dbg.since >= 1000){
+    dbg.fps = dbg.frames; dbg.sps = dbg.steps;
+    dbg.frames = dbg.steps = 0; dbg.since = now;
+  }
+  const lines = [
+    `fps ${dbg.fps}  steps/s ${dbg.sps}`,
+    `x ${lander.x.toFixed(1)} y ${lander.y.toFixed(1)}`,
+    `vx ${lander.vx.toFixed(1)} vy ${lander.vy.toFixed(1)}`,
+  ];
+  ctx.save();
+  ctx.font = "11px monospace"; ctx.textBaseline = "top"; ctx.textAlign = "left";
+  ctx.fillStyle = "rgba(0,0,0,0.7)"; ctx.fillRect(14, H-20-lines.length*13, 190, lines.length*13+6);
+  ctx.fillStyle = "#ff0";
+  lines.forEach((l,i) => ctx.fillText(l, 18, H-17-(lines.length-i)*13));
+  ctx.restore();
+}
+requestAnimationFrame(frame);
 </script>
 </body>
 </html>
