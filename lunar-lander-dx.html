@@ -78,7 +78,15 @@ const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
 // Everything is drawn in a fixed logical resolution, scaled to fit the window
 const W = 960, H = 540;
 const PAD_H = 8;
-const SHIP_HALF_HEIGHT = 20;
+const SHIP_HALF_HEIGHT = 20;      // origin to the bottom of the feet
+// Ship geometry, ship-local (y down, 0,0 = centre of mass)
+const SHIP = {
+  feet: [[-12, SHIP_HALF_HEIGHT], [12, SHIP_HALF_HEIGHT]],
+  nozzle: { y: 12 },               // exhaust leaves here
+  rcs: [[-9, -11], [9, -11]],      // left / right attitude jets
+  // Points tested against the ground: feet, legs' knees, body corners, top of cabin
+  hull: [[-12, 20], [12, 20], [-11, 6], [11, 6], [-9, -11], [9, -11], [0, -16]],
+};
 const DEBUG = new URLSearchParams(location.search).has("debug");
 
 /* === Game state machine ===
@@ -371,12 +379,12 @@ function emitThruster(dt, mainOn, rotLeft, rotRight){
 
   // Main engine: cone out of the bottom of the hull
   for (; emitAccMain >= 1; emitAccMain--)
-    emitParticle((Math.random()-0.5)*4, SHIP_HALF_HEIGHT+2, Math.PI/2, 0.35, 2.2, 0.22, 35, 3, 0.5);
+    emitParticle((Math.random()-0.5)*6, SHIP.nozzle.y+1, Math.PI/2, 0.35, 2.2, 0.22, 35, 3, 0.5);
   // RCS: rotating left (anticlockwise) fires the right-hand jet near the top, pushing right
   for (; emitAccSideL >= 1; emitAccSideL--)
-    emitParticle(6, -8, 0, 0.4, 1.4, 0.14, 0, 2, 0);
+    emitParticle(SHIP.rcs[1][0]+2, SHIP.rcs[1][1], 0, 0.4, 1.4, 0.14, 0, 2, 0);
   for (; emitAccSideR >= 1; emitAccSideR--)
-    emitParticle(-6, -8, Math.PI, 0.4, 1.4, 0.14, 0, 2, 0);
+    emitParticle(SHIP.rcs[0][0]-2, SHIP.rcs[0][1], Math.PI, 0.4, 1.4, 0.14, 0, 2, 0);
 }
 
 function updateThrusterParticles(dt){
@@ -465,14 +473,41 @@ function drawPads(c){
 }
 
 function drawLander(c){
-  // Simple upright triangular hull
   c.save(); c.translate(lander.x, lander.y); c.rotate(lander.angle);
-  c.strokeStyle="#0f0";
+  c.lineJoin = "round"; c.lineCap = "round";
+
+  // Engine glow inside the nozzle while firing
+  if (lander.mainOn){
+    const flick = 0.7 + Math.random()*0.3;
+    c.fillStyle = `rgba(255,170,40,${0.85*flick})`;
+    c.beginPath(); c.moveTo(-4, 6); c.lineTo(4, 6); c.lineTo(6, 12); c.lineTo(-6, 12); c.closePath(); c.fill();
+  }
+
+  c.strokeStyle = "#0f0"; c.lineWidth = 1.4;
+  c.fillStyle = "#021a02";
+  // Legs: strut from the body to each foot, plus a foot pad
   c.beginPath();
-  c.moveTo(0,-SHIP_HALF_HEIGHT);
-  c.lineTo(-10,SHIP_HALF_HEIGHT);
-  c.lineTo(10,SHIP_HALF_HEIGHT);
-  c.closePath(); c.stroke();
+  for (const sx of [-1, 1]){
+    c.moveTo(sx*9, 2);  c.lineTo(sx*12, SHIP_HALF_HEIGHT);
+    c.moveTo(sx*11, 6); c.lineTo(sx*12, SHIP_HALF_HEIGHT);
+    c.moveTo(sx*15, SHIP_HALF_HEIGHT); c.lineTo(sx*9, SHIP_HALF_HEIGHT);
+  }
+  c.stroke();
+  // Descent stage
+  c.beginPath(); c.rect(-11, -4, 22, 10); c.fill(); c.stroke();
+  c.beginPath(); c.moveTo(-11, 1); c.lineTo(11, 1); c.stroke();
+  // Nozzle
+  c.beginPath(); c.moveTo(-4, 6); c.lineTo(4, 6); c.lineTo(6, 12); c.lineTo(-6, 12); c.closePath(); c.stroke();
+  // Ascent stage (cabin)
+  c.beginPath();
+  c.moveTo(-6, -16); c.lineTo(6, -16); c.lineTo(9, -11); c.lineTo(9, -4); c.lineTo(-9, -4); c.lineTo(-9, -11);
+  c.closePath(); c.fill(); c.stroke();
+  // Window
+  c.fillStyle = "#7f7";
+  c.beginPath(); c.moveTo(-4, -13); c.lineTo(1, -13); c.lineTo(-1, -8); c.lineTo(-4, -8); c.closePath(); c.fill();
+  // RCS quads
+  c.fillStyle = "#0f0";
+  for (const [x, y] of SHIP.rcs) c.fillRect(x + (x < 0 ? -2 : 0), y - 1, 2, 2);
   c.restore();
 }
 
@@ -726,6 +761,7 @@ function update(dt){
     if (now - lastMainSound > 90){ playThrust(110, 0.12); lastMainSound = now; }
   }
 
+  lander.mainOn = mainOn;
   emitThruster(dt, mainOn, rotL, rotR);
 
   // Gravity and integrate
@@ -740,9 +776,9 @@ function update(dt){
   if (lander.y < SHIP_HALF_HEIGHT){ lander.y = SHIP_HALF_HEIGHT; lander.vy = Math.max(0, lander.vy); }
 
   // Collision: test the feet and a few hull points against the ground line
-  const footL = toWorld(-10, SHIP_HALF_HEIGHT), footR = toWorld(10, SHIP_HALF_HEIGHT);
-  const hull = [footL, footR, toWorld(0, -SHIP_HALF_HEIGHT), toWorld(-5, 0), toWorld(5, 0)];
+  const hull = SHIP.hull.map(([x, y]) => toWorld(x, y));
   if (!hull.some(p => p.y >= surfaceY(p.x))) return;
+  const [footL, footR] = SHIP.feet.map(([x, y]) => toWorld(x, y));
 
   const L = CONFIG.landing;
   const tilt = Math.abs(lander.angle) * 180 / Math.PI;
@@ -751,6 +787,7 @@ function update(dt){
   const soft = pad && lander.vy <= L.safeVy && Math.abs(lander.vx) <= L.safeVx && tilt <= L.safeAngle;
   lander.touchdownVy = lander.vy;
   lander.touchdownTilt = tilt;
+  lander.mainOn = false;
   if (soft){
     setState("landed");
     lander.pad = pad;
