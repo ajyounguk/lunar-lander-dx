@@ -87,7 +87,10 @@ const CONFIG = {
     shakePx: 14,          // max screen shake offset
     debrisGravity: 70,    // debris falls faster than the ship so it stays near the crash
     crt: true,            // bloom + scanlines; C toggles it in game
-    bloomStrength: 0.22,
+    bloomStrength: 0.45,  // phosphor glow
+    scanlines: 0.16,      // scanline darkness, 0..1
+    persistence: 0.6,     // phosphor afterglow: fraction of brightness kept per 1/60 s (0 = off)
+    vignette: 0.6,        // extra corner darkening with CRT on
   },
 };
 
@@ -379,6 +382,8 @@ const buf = document.createElement("canvas"), bctx = buf.getContext("2d");
 const vignette = document.createElement("canvas"), vctx = vignette.getContext("2d");
 // Bloom is built at quarter resolution: blur is cheap there, and upscaling softens it further
 const bloom = document.createElement("canvas"), blctx = bloom.getContext("2d");
+// Phosphor persistence: each frame keeps the brighter of the new frame and the faded old one
+const trail = document.createElement("canvas"), tctx = trail.getContext("2d");
 const canFilter = (() => { const t = document.createElement("canvas").getContext("2d"); t.filter = "blur(1px)"; return t.filter === "blur(1px)"; })();
 try { const v = localStorage.getItem("moonLanderDX.crt"); if (v !== null) CONFIG.fx.crt = v === "1"; } catch {}
 function toggleCRT(){
@@ -395,6 +400,7 @@ function resize(){
   view.pxW = Math.round(cssW * dpr); view.pxH = Math.round(cssH * dpr);
   view.k = view.pxW / W;
   for (const c of [canvas, buf, vignette]){ c.width = view.pxW; c.height = view.pxH; }
+  trail.width = view.pxW; trail.height = view.pxH;
   bloom.width = Math.max(1, Math.round(view.pxW / 4)); bloom.height = Math.max(1, Math.round(view.pxH / 4));
 
   vctx.setTransform(view.k,0,0,view.k,0,0);
@@ -1090,19 +1096,32 @@ function renderSceneToBuffer(){
 }
 
 /* === Post FX: bloom, vignette, scanlines, rounded border, title badge === */
-function postFXDraw(){
+function postFXDraw(realDt){
   const k = view.k;
   ctx.setTransform(1,0,0,1,0,0);
   ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over"; ctx.filter = "none";
   ctx.clearRect(0,0,view.pxW,view.pxH);
-  ctx.drawImage(buf, 0, 0);
+  let frameImg = buf;
+  if (CONFIG.fx.crt && CONFIG.fx.persistence > 0){
+    // Fade the previous frame, then keep whichever is brighter per pixel
+    const keep = Math.pow(CONFIG.fx.persistence, Math.max(realDt, 1/240) * 60);
+    tctx.globalCompositeOperation = "source-over";
+    tctx.globalAlpha = 1 - keep;
+    tctx.fillStyle = "#000"; tctx.fillRect(0, 0, view.pxW, view.pxH);
+    tctx.globalAlpha = 1;
+    tctx.globalCompositeOperation = "lighten";
+    tctx.drawImage(buf, 0, 0);
+    tctx.globalCompositeOperation = "source-over";
+    frameImg = trail;
+  }
+  ctx.drawImage(frameImg, 0, 0);
 
   // Phosphor glow: downscale, blur, add back on top
   if (CONFIG.fx.crt){
     blctx.setTransform(1,0,0,1,0,0);
     blctx.clearRect(0, 0, bloom.width, bloom.height);
     if (canFilter) blctx.filter = "blur(2px) brightness(1.3)";
-    blctx.drawImage(buf, 0, 0, bloom.width, bloom.height);
+    blctx.drawImage(frameImg, 0, 0, bloom.width, bloom.height);
     if (canFilter) blctx.filter = "none";
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
@@ -1113,11 +1132,16 @@ function postFXDraw(){
   }
 
   ctx.drawImage(vignette, 0, 0);
+  if (CONFIG.fx.crt && CONFIG.fx.vignette > 0){
+    ctx.globalAlpha = CONFIG.fx.vignette;
+    ctx.drawImage(vignette, 0, 0);
+    ctx.globalAlpha = 1;
+  }
 
   // Everything below is in logical units
   ctx.setTransform(k,0,0,k,0,0);
   if (CONFIG.fx.crt){
-    const flicker = 0.04 + 0.015 * Math.sin(performance.now()*0.03);
+    const flicker = CONFIG.fx.scanlines * (1 + 0.25 * Math.sin(performance.now()*0.03));
     ctx.fillStyle = `rgba(0,0,0,${flicker})`;
     for (let y=0; y<H; y+=2) ctx.fillRect(0, y, W, 1);
   }
@@ -1278,7 +1302,7 @@ function frame(now){
     dbg.steps++;
   }
   renderSceneToBuffer();
-  postFXDraw();
+  postFXDraw(realDt);
   if (DEBUG) drawDebug(now);
   requestAnimationFrame(frame);
 }
