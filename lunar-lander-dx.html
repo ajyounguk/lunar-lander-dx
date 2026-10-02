@@ -2,14 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Moon Lander DX</title>
 <style>
-  body { margin:0; background:#000; color:#0f0; font-family:monospace; }
-  canvas { display:block; margin:auto; background:#000; image-rendering:pixelated; }
+  html, body { margin:0; height:100%; background:#000; overflow:hidden; }
+  body { display:flex; align-items:center; justify-content:center; }
+  canvas { display:block; background:#000; touch-action:none; }
 </style>
 </head>
 <body>
-<canvas id="game" width="640" height="480"></canvas>
+<canvas id="game"></canvas>
 <script>
 /* === Config: all tuning numbers live here (distances in px, time in seconds) === */
 const CONFIG = {
@@ -33,12 +35,14 @@ const CONFIG = {
   start: { y: 50, maxVx: 15 },
   fx: {
     dustGravity: 0.12,
-    starDrift: 12,        // px/s
+    bloom: true,
+    scanlines: true,
   },
 };
 
 const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
-const W = canvas.width, H = canvas.height, GROUND_Y = H - 40;
+// Everything is drawn in a fixed logical resolution, scaled to fit the window
+const W = 960, H = 540, GROUND_Y = H - 40;
 const PAD_W = 60, PAD_H = 8, PAD_X = W/2 - PAD_W/2, PAD_Y = GROUND_Y - PAD_H;
 const SHIP_HALF_HEIGHT = 20;
 const DEBUG = new URLSearchParams(location.search).has("debug");
@@ -94,18 +98,37 @@ function playThrust(freq=110, dur=0.12){
 }
 let lastMainSound = 0, lastSideSound = 0;
 
-/* === Offscreen buffer + vignette === */
-const buf = document.createElement("canvas"); buf.width = W; buf.height = H;
-const bctx = buf.getContext("2d");
-const vignette = document.createElement("canvas"); vignette.width = W; vignette.height = H;
-const vctx = vignette.getContext("2d");
-const grad = vctx.createRadialGradient(W/2, H/2, Math.min(W,H)*0.2, W/2, H/2, Math.max(W,H)*0.75);
-grad.addColorStop(0, "rgba(0,0,0,0)");
-grad.addColorStop(1, "rgba(0,0,0,0.55)");
-vctx.fillStyle = grad; vctx.fillRect(0,0,W,H);
+/* === Display scaling: offscreen buffer + vignette at device-pixel resolution === */
+const view = { k: 1, pxW: W, pxH: H };   // k = device pixels per logical px
+const buf = document.createElement("canvas"), bctx = buf.getContext("2d");
+const vignette = document.createElement("canvas"), vctx = vignette.getContext("2d");
+
+function resize(){
+  const dpr = window.devicePixelRatio || 1;
+  const fit = Math.min(window.innerWidth / W, window.innerHeight / H);
+  const cssW = Math.floor(W * fit), cssH = Math.floor(H * fit);
+  canvas.style.width = cssW + "px"; canvas.style.height = cssH + "px";
+  view.pxW = Math.round(cssW * dpr); view.pxH = Math.round(cssH * dpr);
+  view.k = view.pxW / W;
+  for (const c of [canvas, buf, vignette]){ c.width = view.pxW; c.height = view.pxH; }
+
+  vctx.setTransform(view.k,0,0,view.k,0,0);
+  const grad = vctx.createRadialGradient(W/2, H/2, Math.min(W,H)*0.2, W/2, H/2, Math.max(W,H)*0.75);
+  grad.addColorStop(0, "rgba(0,0,0,0)");
+  grad.addColorStop(1, "rgba(0,0,0,0.55)");
+  vctx.fillStyle = grad; vctx.fillRect(0,0,W,H);
+}
+window.addEventListener("resize", resize);
+resize();
+
+/* === Camera: world → screen. Identity for now; zoom comes later === */
+const camera = { x: W/2, y: H/2, zoom: 1 };
+function applyCamera(c){
+  c.translate(W/2, H/2); c.scale(camera.zoom, camera.zoom); c.translate(-camera.x, -camera.y);
+}
 
 /* === Background: stars + parallax mountains === */
-const stars = Array.from({length:90}, () => ({x:Math.random()*W,y:Math.random()*H,speed:0.15+Math.random()*0.5}));
+const stars = Array.from({length:140}, () => ({x:Math.random()*W, y:Math.random()*(GROUND_Y-40), phase:Math.random()*Math.PI*2, rate:0.5+Math.random()*2}));
 function lcg(seed){return ()=> (seed=(seed*1664525+1013904223)>>>0)/0xFFFFFFFF;}
 function genMountain(period,step,baseY,amp,seed){
   const rand=lcg(seed); const n=Math.ceil(period/step)+2; const pts=[]; let h=0;
@@ -113,10 +136,9 @@ function genMountain(period,step,baseY,amp,seed){
   return {pts,period:step*(n-1),step,baseY};
 }
 const mountains=[
-  {layer:genMountain(800,16,GROUND_Y-70,14,12345),speed:0.08,fill:"rgba(0,40,0,0.45)",stroke:"#053"},
-  {layer:genMountain(800,12,GROUND_Y-35,22,67890),speed:0.14,fill:"rgba(0,60,0,0.55)",stroke:"#075"}
+  {layer:genMountain(W,16,GROUND_Y-70,14,12345),fill:"rgba(0,40,0,0.45)",stroke:"#053"},
+  {layer:genMountain(W,12,GROUND_Y-35,22,67890),fill:"rgba(0,60,0,0.55)",stroke:"#075"}
 ];
-let mountainOffsets=[0,0];
 
 /* === State === */
 let lander;
@@ -231,50 +253,34 @@ function drawThrusterParticles(c){
   c.restore();
 }
 
-/* === Rounded border helpers === */
-function drawRoundedRectStroke(c, x, y, w, h, r){
+/* === Rounded rect path === */
+function roundRectPath(c, x, y, w, h, r){
   c.beginPath();
   c.moveTo(x+r, y);
-  c.lineTo(x+w-r, y);
-  c.arcTo(x+w, y, x+w, y+r, r);
-  c.lineTo(x+w, y+h-r);
-  c.arcTo(x+w, y+h, x+w-r, y+h, r);
-  c.lineTo(x+r, y+h);
-  c.arcTo(x, y+h, x, y+h-r, r);
-  c.lineTo(x, y+r);
-  c.arcTo(x, y, x+r, y, r);
-  c.stroke();
-}
-function drawRoundedRectFill(c, x, y, w, h, r){
-  c.beginPath();
-  c.moveTo(x+r, y);
-  c.lineTo(x+w-r, y);
-  c.arcTo(x+w, y, x+w, y+r, r);
-  c.lineTo(x+w, y+h-r);
-  c.arcTo(x+w, y+h, x+w-r, y+h, r);
-  c.lineTo(x+r, y+h);
-  c.arcTo(x, y+h, x, y+h-r, r);
-  c.lineTo(x, y+r);
-  c.arcTo(x, y, x+r, y, r);
-  c.fill();
+  c.arcTo(x+w, y, x+w, y+h, r);
+  c.arcTo(x+w, y+h, x, y+h, r);
+  c.arcTo(x, y+h, x, y, r);
+  c.arcTo(x, y, x+w, y, r);
+  c.closePath();
 }
 
 /* === Drawing (to back buffer) === */
 function drawBackground(c){
   c.fillStyle="#000"; c.fillRect(0,0,W,H);
+  const t = performance.now()/1000;
   c.fillStyle="#0f0";
-  for(const s of stars) c.fillRect(s.x,s.y,1,1);
-  mountains.forEach((m,i)=>{
-    const off=mountainOffsets[i];
+  for(const s of stars){
+    c.globalAlpha = 0.45 + 0.55*(0.5+0.5*Math.sin(s.phase + t*s.rate));
+    c.fillRect(s.x,s.y,1,1);
+  }
+  c.globalAlpha = 1;
+  for(const m of mountains){
     c.fillStyle=m.fill; c.strokeStyle=m.stroke; c.lineWidth=1;
-    for(let tile=0; tile<2; tile++){
-      const x0 = -off + tile*m.layer.period;
-      c.beginPath(); c.moveTo(x0, H);
-      for(const p of m.layer.pts) c.lineTo(x0+p.x, p.y);
-      c.lineTo(x0+m.layer.pts[m.layer.pts.length-1].x, H);
-      c.closePath(); c.fill(); c.stroke();
-    }
-  });
+    c.beginPath(); c.moveTo(0, H);
+    for(const p of m.layer.pts) c.lineTo(p.x, p.y);
+    c.lineTo(m.layer.pts[m.layer.pts.length-1].x, H);
+    c.closePath(); c.fill(); c.stroke();
+  }
   // Ground baseline
   c.strokeStyle="#244"; c.lineWidth=1;
   c.beginPath(); c.moveTo(0,GROUND_Y); c.lineTo(W,GROUND_Y); c.stroke();
@@ -343,9 +349,9 @@ function drawHUD(c){
   drawGauge(c, PAD_X+PAD_W+40, PAD_Y-30, 26, lander.vy, -180, 180, "V-VEL", "#ff0", {min:-safeVy, max:safeVy});
   // Controls + data
   c.fillStyle="#0f0"; c.font="12px monospace"; c.textAlign="left"; c.textBaseline="alphabetic";
-  c.fillText("Up: thrust   Left/Right: rotate   P: pause", 12, 18);
+  c.fillText("Up: thrust   Left/Right: rotate   P: pause", 24, 32);
   const deg = lander.angle * 180 / Math.PI;
-  c.fillText(`Fuel: ${Math.max(0, lander.fuel).toFixed(0)}   VX: ${lander.vx.toFixed(0)}   VY: ${lander.vy.toFixed(0)}   ANG: ${deg.toFixed(0)}°`, 12, 34);
+  c.fillText(`Fuel: ${Math.max(0, lander.fuel).toFixed(0)}   VX: ${lander.vx.toFixed(0)}   VY: ${lander.vy.toFixed(0)}   ANG: ${deg.toFixed(0)}°`, 24, 48);
 }
 
 // Centred message panel for title / pause / result screens
@@ -353,8 +359,8 @@ function drawPanel(c, title, lines, titleColor="#0f0"){
   const blink = Math.floor(performance.now()/500) % 2 === 0;
   const w = 340, h = 70 + lines.length*18, x = (W-w)/2, y = (H-h)/2 - 30;
   c.save();
-  c.fillStyle = "rgba(0,12,0,0.82)"; drawRoundedRectFill(c, x, y, w, h, 8);
-  c.strokeStyle = "rgba(0,255,0,0.6)"; c.lineWidth = 2; drawRoundedRectStroke(c, x, y, w, h, 8);
+  c.fillStyle = "rgba(0,12,0,0.82)"; roundRectPath(c, x, y, w, h, 8); c.fill();
+  c.strokeStyle = "rgba(0,255,0,0.6)"; c.lineWidth = 2; roundRectPath(c, x, y, w, h, 8); c.stroke();
   c.textAlign = "center"; c.textBaseline = "top";
   c.fillStyle = titleColor; c.font = "bold 22px monospace";
   c.fillText(title, W/2, y+16);
@@ -399,77 +405,73 @@ function drawOverlay(c){
 
 /* === Compose scene to back buffer === */
 function renderSceneToBuffer(){
+  const k = view.k;
   bctx.setTransform(1,0,0,1,0,0);
-  bctx.clearRect(0,0,W,H);
+  bctx.clearRect(0,0,view.pxW,view.pxH);
+
+  // World pass
+  bctx.setTransform(k,0,0,k,0,0);
+  bctx.save();
+  applyCamera(bctx);
   drawBackground(bctx);
   drawPad(bctx);
-  // Dust appears over ground, under lander
-  drawDust(bctx);
+  drawDust(bctx);                 // over ground, under lander
   if (game.state !== "crashed") drawLander(bctx);
-  // Thruster particles on top for glow
-  drawThrusterParticles(bctx);
+  drawThrusterParticles(bctx);    // on top for glow
+  bctx.restore();
+
+  // HUD pass (screen space)
   if (game.state !== "title") drawHUD(bctx);
   drawOverlay(bctx);
 }
 
-/* === Post FX (no jitter): bloom, vignette, scanlines, rounded border, title badge === */
+/* === Post FX: bloom, vignette, scanlines, rounded border, title badge === */
 function postFXDraw(){
+  const k = view.k;
   ctx.setTransform(1,0,0,1,0,0);
-  ctx.clearRect(0,0,W,H);
-
-  // Base scene
-  ctx.filter = "none";
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over"; ctx.filter = "none";
+  ctx.clearRect(0,0,view.pxW,view.pxH);
   ctx.drawImage(buf, 0, 0);
 
   // Subtle bloom/bleed
-  ctx.save();
-  ctx.globalCompositeOperation = "lighter";
-  ctx.globalAlpha = 0.10;
-  ctx.filter = "blur(1.4px) brightness(1.25)";
-  ctx.drawImage(buf, 0, 0);
-  ctx.restore();
+  if (CONFIG.fx.bloom){
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.globalAlpha = 0.10;
+    ctx.filter = `blur(${(1.4*k).toFixed(1)}px) brightness(1.25)`;
+    ctx.drawImage(buf, 0, 0);
+    ctx.restore();
+  }
 
-  // Vignette
-  ctx.globalAlpha = 1; ctx.filter = "none";
   ctx.drawImage(vignette, 0, 0);
 
-  // Scanlines (steady)
-  const flicker = 0.04 + 0.015 * Math.sin(performance.now()*0.03);
-  ctx.fillStyle = `rgba(0,0,0,${flicker})`;
-  for (let y=0; y<H; y+=2) ctx.fillRect(0, y, W, 1);
+  // Everything below is in logical units
+  ctx.setTransform(k,0,0,k,0,0);
+  if (CONFIG.fx.scanlines){
+    const flicker = 0.04 + 0.015 * Math.sin(performance.now()*0.03);
+    ctx.fillStyle = `rgba(0,0,0,${flicker})`;
+    for (let y=0; y<H; y+=2) ctx.fillRect(0, y, W, 1);
+  }
 
   // Rounded neon border
-  ctx.save();
   ctx.lineWidth = 3.5; ctx.strokeStyle = "rgba(0,255,0,0.35)";
-  drawRoundedRectStroke(ctx, 6, 6, W-12, H-12, 10);
+  roundRectPath(ctx, 6, 6, W-12, H-12, 10); ctx.stroke();
   ctx.lineWidth = 2; ctx.strokeStyle = "rgba(0,64,0,0.55)";
-  drawRoundedRectStroke(ctx, 12, 12, W-24, H-24, 8);
-  ctx.restore();
+  roundRectPath(ctx, 12, 12, W-24, H-24, 8); ctx.stroke();
 
   // Title badge top-right
   const label = "Moon Lander DX — Shareware";
-  ctx.font = "bold 12px monospace";
+  ctx.font = "bold 12px monospace"; ctx.textAlign = "left"; ctx.textBaseline = "top";
   const tw = Math.ceil(ctx.measureText(label).width) + 16, th = 20;
-  const bx = W - tw - 14, by = 12;
+  const bx = W - tw - 20, by = 18;
   ctx.fillStyle = "rgba(0,0,0,0.6)";
-  drawRoundedRectFill(ctx, bx, by, tw, th, 6);
-  ctx.strokeStyle = "rgba(0,255,0,0.25)";
-  ctx.lineWidth = 1.5; drawRoundedRectStroke(ctx, bx, by, tw, th, 6);
-  ctx.fillStyle = "#0f0"; ctx.textBaseline = "top";
+  roundRectPath(ctx, bx, by, tw, th, 6); ctx.fill();
+  ctx.strokeStyle = "rgba(0,255,0,0.25)"; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = "#0f0";
   ctx.fillText(label, bx+8, by+4);
 }
 
 /* === Physics === */
-function updateBackground(dt){
-  for(const s of stars){
-    s.x -= s.speed*CONFIG.fx.starDrift*dt;
-    if(s.x<0){ s.x=W; s.y=Math.random()*H; }
-  }
-  mountains.forEach((m,i)=>{
-    mountainOffsets[i]=(mountainOffsets[i]+m.speed*60*dt)%m.layer.period;
-  });
-}
-
 // Ship-local points → world space
 function toWorld(lx, ly){
   const cos = Math.cos(lander.angle), sin = Math.sin(lander.angle);
@@ -551,7 +553,6 @@ function step(dt){
   if (game.state === "paused") return;
   game.stateTime += dt;
   if (game.state === "playing") update(dt);
-  updateBackground(dt);
   updateDust(dt);
   updateThrusterParticles(dt);
 }
@@ -589,6 +590,7 @@ function drawDebug(now){
     `ang ${(lander.angle*180/Math.PI).toFixed(1)}° state ${game.state}`,
   ];
   ctx.save();
+  ctx.setTransform(view.k,0,0,view.k,0,0);
   ctx.font = "11px monospace"; ctx.textBaseline = "top"; ctx.textAlign = "left";
   ctx.fillStyle = "rgba(0,0,0,0.7)"; ctx.fillRect(14, H-20-lines.length*13, 190, lines.length*13+6);
   ctx.fillStyle = "#ff0";
