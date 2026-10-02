@@ -1274,6 +1274,7 @@ function updatePopups(dt){
 }
 
 function step(dt){
+  if (shot.frozen()) return;
   if (game.state === "paused") return;
   game.stateTime += dt;
   if (game.state === "playing") update(dt);
@@ -1293,7 +1294,7 @@ const dbg = { frames: 0, steps: 0, fps: 0, sps: 0, since: performance.now() };
 function frame(now){
   const realDt = Math.min(MAX_FRAME, (now - lastTime) / 1000);
   lastTime = now;
-  if (game.state !== "paused") updateEffects(realDt);
+  if (game.state !== "paused" && !shot.isFrozen) updateEffects(realDt);
   else toast.life = Math.max(0, toast.life - realDt);
   accumulator += realDt * effects.timeScale;
   while (accumulator >= STEP){
@@ -1328,8 +1329,50 @@ function drawDebug(now){
   lines.forEach((l,i) => ctx.fillText(l, 18, H-17-(lines.length-i)*13));
   ctx.restore();
 }
+/* === Screenshot staging: ?shot=flight|landing|crash sets up a scene on a fixed
+   level, runs it briefly, then freezes the simulation. Used for the README images. === */
+const shot = {
+  name: new URLSearchParams(location.search).get("shot"),
+  freezeAt: 0, isFrozen: false,
+  frozen(){ return this.isFrozen; },
+};
+function stageShot(){
+  const scenes = {
+    flight(){
+      Object.assign(lander, { x: 300, y: 150, vx: 34, vy: 6, angle: 0.38 });
+      keys.ArrowUp = true;
+      shot.freezeAt = 1.2;
+    },
+    landing(){
+      const pad = terrain.pads.find(p => p.mult === 2);
+      Object.assign(lander, { x: (pad.x0 + pad.x1) / 2 + 3, y: pad.y - SHIP_HALF_HEIGHT - 42, vx: 3, vy: 18, angle: -0.04 });
+      keys.ArrowUp = true;
+      Object.assign(camera, { close: true, zoom: CONFIG.camera.zoom, x: lander.x, y: lander.y + 30 });
+      shot.freezeAt = 0.5;
+    },
+    crash(){
+      // Somewhere off-pad on the right, coming in too fast
+      let x = 820;
+      while (padAt(x) || padAt(x - 20) || padAt(x + 20)) x -= 40;
+      Object.assign(lander, { x, y: surfaceY(x) - 70, vx: 25, vy: 140, angle: 0.5 });
+      shot.freezeAt = 0.7;
+    },
+  };
+  if (!scenes[shot.name]) return;
+  run = { level: 3, score: 1450, fuel: 640, seed: 20261002, popups: [] };
+  startLevel();
+  scenes[shot.name]();
+  game.stateTime = 10;   // past the bright control-hint phase
+  // Simulate up to the chosen moment right away (headless browsers render few frames),
+  // then hold that moment still
+  for (let t = 0; t < shot.freezeAt; t += STEP){ step(STEP); updateEffects(STEP); }
+  effects.shake = effects.flash = 0;
+  shot.isFrozen = true;
+}
+
 // Start: build a level for the title screen backdrop, then run the loop
 init();
+stageShot();
 requestAnimationFrame(frame);
 </script>
 </body>
