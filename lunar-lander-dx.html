@@ -1,9 +1,8 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Moon Lander DX — Retro Shareware (Particles + Dust)</title>
+<title>Moon Lander DX</title>
 <style>
   body { margin:0; background:#000; color:#0f0; font-family:monospace; }
   canvas { display:block; margin:auto; background:#000; image-rendering:pixelated; }
@@ -24,18 +23,20 @@ const SHIP_HALF_HEIGHT = 20;
 const keys = Object.create(null);
 document.addEventListener("keydown", e => {
   if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].includes(e.code)) e.preventDefault();
-  keys[e.key] = true;
+  keys[e.code] = true;
   if (e.code === "Space") init();        // reset always
   if (audioCtx.state === "suspended") audioCtx.resume(); // unlock audio
 });
-document.addEventListener("keyup", e => keys[e.key] = false);
+document.addEventListener("keyup", e => keys[e.code] = false);
+// Drop held keys when the window loses focus, otherwise they stay stuck down
+window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; });
 
 /* === Audio (retro blips) === */
 const audioCtx = new (window.AudioContext||window.webkitAudioContext)();
 function playThrust(freq=110, dur=0.12){
   const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
   osc.type = "sawtooth"; osc.frequency.value = freq;
-  gain.gain.value = 0.1;
+  gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
   gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
   osc.connect(gain).connect(audioCtx.destination);
   osc.start(); osc.stop(audioCtx.currentTime + dur);
@@ -468,4 +469,3 @@ frame();
 </script>
 </body>
 </html>
-```
