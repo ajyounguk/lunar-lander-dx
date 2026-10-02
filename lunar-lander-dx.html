@@ -17,16 +17,18 @@ const CONFIG = {
     stepHz: 120,          // fixed simulation rate, independent of screen refresh
     gravity: 14.4,        // px/s²
     thrust: 43.2,         // main engine, px/s²
-    sideThrust: 21.6,     // side engines, px/s²
+    rotateSpeed: 2.6,     // max rotation rate, rad/s
+    rotateAccel: 14,      // how quickly rotation reaches full rate, rad/s²
   },
   fuel: {
     start: 200,
     mainBurn: 24,         // units/s
-    sideBurn: 15,         // units/s
+    rcsBurn: 3,           // rotation jets, units/s
   },
   landing: {
     safeVy: 54,           // max downward speed, px/s
     safeVx: 36,           // max sideways speed, px/s
+    safeAngle: 12,        // max tilt from upright, degrees
   },
   start: { y: 50, maxVx: 15 },
   fx: {
@@ -126,6 +128,7 @@ function init(){
   lander = {
     x: W/2, y: CONFIG.start.y,
     vx: (Math.random()*2-1)*CONFIG.start.maxVx, vy: 0,
+    angle: 0, spin: 0,    // radians, 0 = upright, positive = clockwise
     fuel: CONFIG.fuel.start
   };
   dust.length = 0;
@@ -137,7 +140,8 @@ init();
 /* === Particles === */
 function spawnDustBurst(x, y, count, strength){
   for(let i=0;i<count;i++){
-    const ang = Math.PI + (Math.random()-0.5) * 0.8; // mostly left-right along surface
+    // Spray both ways along the surface
+    const ang = (Math.random() < 0.5 ? Math.PI : 0) + (Math.random()-0.5) * 0.8;
     const spd = strength * (0.4 + Math.random()*0.8);
     dust.push({
       x, y, vx: Math.cos(ang)*spd, vy: Math.sin(ang)*spd*0.4,
@@ -164,63 +168,40 @@ function drawDust(c){
   c.globalAlpha = 1;
 }
 
-// Thruster flames (main + side) as particles
-function emitThruster(dt, mainOn, leftOn, rightOn){
-  // emission rates (particles per second)
-  const rateMain = 160, rateSide = 120;
-  if (mainOn){ emitAccMain += rateMain * dt; }
-  if (leftOn){ emitAccSideL += rateSide * dt; }
-  if (rightOn){ emitAccSideR += rateSide * dt; }
+// Thruster flames as particles. Emission points and directions are given in ship-local
+// space (y down, ship pointing up at angle 0) and rotated into world space.
+function emitParticle(localX, localY, localDir, spread, speed, life, hue, size, pull){
+  const a = lander.angle, cos = Math.cos(a), sin = Math.sin(a);
+  const dir = localDir + a + (Math.random()-0.5)*spread;
+  const spd = speed * (0.8 + Math.random()*0.5);
+  thrusterParticles.push({
+    x: lander.x + localX*cos - localY*sin,
+    y: lander.y + localX*sin + localY*cos,
+    // particle units are px per 1/60 s; inherit a little ship velocity
+    vx: Math.cos(dir)*spd + lander.vx/60*0.5,
+    vy: Math.sin(dir)*spd + lander.vy/60*0.5,
+    ax: Math.cos(dir)*pull, ay: Math.sin(dir)*pull,
+    life: life * (0.8 + Math.random()*0.6),
+    hue: hue + Math.random()*15,
+    size: size * (0.8 + Math.random()*0.8),
+  });
+}
 
-  // Main thruster: downward cone from ship bottom
-  while (emitAccMain >= 1){
-    emitAccMain -= 1;
-    const baseX = lander.x;
-    const baseY = lander.y + SHIP_HALF_HEIGHT;
-    const spread = 0.35;
-    const ang = Math.PI/2 + (Math.random()-0.5)*spread; // around downward
-    const spd = 1.5 + Math.random()*1.2;
-    thrusterParticles.push({
-      x: baseX + (Math.random()-0.5)*3,
-      y: baseY + 2,
-      vx: Math.cos(ang)*spd*0.6,
-      vy: Math.sin(ang)*spd*1.2,
-      life: 0.18 + Math.random()*0.12,
-      hue: 35 + Math.random()*15, // orange-yellow
-      size: 2 + Math.random()*2,
-      type: "main"
-    });
-  }
-  // Left engine: emits leftwards from left side
-  while (emitAccSideL >= 1){
-    emitAccSideL -= 1;
-    const baseX = lander.x - 12, baseY = lander.y + 0;
-    const ang = Math.PI + (Math.random()-0.5)*0.35; // left
-    const spd = 1.2 + Math.random()*1.0;
-    thrusterParticles.push({
-      x: baseX - 2, y: baseY + (Math.random()-0.5)*6,
-      vx: Math.cos(ang)*spd, vy: Math.sin(ang)*spd*0.5,
-      life: 0.14 + Math.random()*0.1,
-      hue: 0 + Math.random()*20, // reddish
-      size: 1.6 + Math.random()*1.4,
-      type: "sideL"
-    });
-  }
-  // Right engine: emits rightwards from right side
-  while (emitAccSideR >= 1){
-    emitAccSideR -= 1;
-    const baseX = lander.x + 12, baseY = lander.y + 0;
-    const ang = 0 + (Math.random()-0.5)*0.35; // right
-    const spd = 1.2 + Math.random()*1.0;
-    thrusterParticles.push({
-      x: baseX + 2, y: baseY + (Math.random()-0.5)*6,
-      vx: Math.cos(ang)*spd, vy: Math.sin(ang)*spd*0.5,
-      life: 0.14 + Math.random()*0.1,
-      hue: 0 + Math.random()*20,
-      size: 1.6 + Math.random()*1.4,
-      type: "sideR"
-    });
-  }
+function emitThruster(dt, mainOn, rotLeft, rotRight){
+  // emission rates (particles per second)
+  const rateMain = 160, rateRcs = 60;
+  if (mainOn) emitAccMain += rateMain * dt;
+  if (rotLeft) emitAccSideL += rateRcs * dt;
+  if (rotRight) emitAccSideR += rateRcs * dt;
+
+  // Main engine: cone out of the bottom of the hull
+  for (; emitAccMain >= 1; emitAccMain--)
+    emitParticle((Math.random()-0.5)*4, SHIP_HALF_HEIGHT+2, Math.PI/2, 0.35, 2.2, 0.22, 35, 3, 0.5);
+  // RCS: rotating left (anticlockwise) fires the right-hand jet near the top, pushing right
+  for (; emitAccSideL >= 1; emitAccSideL--)
+    emitParticle(6, -8, 0, 0.4, 1.4, 0.14, 0, 2, 0);
+  for (; emitAccSideR >= 1; emitAccSideR--)
+    emitParticle(-6, -8, Math.PI, 0.4, 1.4, 0.14, 0, 2, 0);
 }
 
 function updateThrusterParticles(dt){
@@ -228,8 +209,9 @@ function updateThrusterParticles(dt){
     // Slight turbulence drag
     p.vx *= (1 - 0.8*dt);
     p.vy *= (1 - 0.6*dt);
-    // Main exhaust pulls downward a bit more
-    if (p.type === "main") p.vy += 0.5 * dt * 60;
+    // Main exhaust keeps accelerating away from the nozzle
+    p.vx += p.ax * dt * 60;
+    p.vy += p.ay * dt * 60;
     p.x += p.vx * dt * 60;
     p.y += p.vy * dt * 60;
     p.life -= dt;
@@ -310,7 +292,7 @@ function drawPad(c){
 
 function drawLander(c){
   // Simple upright triangular hull
-  c.save(); c.translate(lander.x, lander.y);
+  c.save(); c.translate(lander.x, lander.y); c.rotate(lander.angle);
   c.strokeStyle="#0f0";
   c.beginPath();
   c.moveTo(0,-SHIP_HALF_HEIGHT);
@@ -361,8 +343,9 @@ function drawHUD(c){
   drawGauge(c, PAD_X+PAD_W+40, PAD_Y-30, 26, lander.vy, -180, 180, "V-VEL", "#ff0", {min:-safeVy, max:safeVy});
   // Controls + data
   c.fillStyle="#0f0"; c.font="12px monospace"; c.textAlign="left"; c.textBaseline="alphabetic";
-  c.fillText("Arrows: thrust   P: pause", 12, 18);
-  c.fillText(`Fuel: ${Math.max(0, lander.fuel).toFixed(0)}   VX: ${lander.vx.toFixed(0)}   VY: ${lander.vy.toFixed(0)}`, 12, 34);
+  c.fillText("Up: thrust   Left/Right: rotate   P: pause", 12, 18);
+  const deg = lander.angle * 180 / Math.PI;
+  c.fillText(`Fuel: ${Math.max(0, lander.fuel).toFixed(0)}   VX: ${lander.vx.toFixed(0)}   VY: ${lander.vy.toFixed(0)}   ANG: ${deg.toFixed(0)}°`, 12, 34);
 }
 
 // Centred message panel for title / pause / result screens
@@ -389,8 +372,8 @@ function drawOverlay(c){
   switch (game.state){
     case "title":
       drawPanel(c, "MOON LANDER DX", [
-        "Land softly on the pad.",
-        "Down: main engine   Left/Right: side jets",
+        "Land slowly and upright on the pad.",
+        "Up / W: thrust   Left/Right or A/D: rotate",
         "P / Esc: pause",
         "",
         "> PRESS SPACE TO START",
@@ -487,67 +470,80 @@ function updateBackground(dt){
   });
 }
 
+// Ship-local points → world space
+function toWorld(lx, ly){
+  const cos = Math.cos(lander.angle), sin = Math.sin(lander.angle);
+  return { x: lander.x + lx*cos - ly*sin, y: lander.y + lx*sin + ly*cos };
+}
+
 function update(dt){
   const P = CONFIG.physics, F = CONFIG.fuel;
-
   const now = performance.now();
-  let mainOn=false, leftOn=false, rightOn=false;
+  const hasFuel = lander.fuel > 0;
 
-  // Controls
-  if (keys["ArrowDown"] && lander.fuel > 0){
-    lander.vy -= P.thrust*dt;
+  // Rotation: ease the spin rate towards the target so taps give fine control
+  const rotL = hasFuel && !!(keys["ArrowLeft"] || keys["KeyA"]);
+  const rotR = hasFuel && !!(keys["ArrowRight"] || keys["KeyD"]);
+  const targetSpin = (rotR - rotL) * P.rotateSpeed;
+  const maxDelta = P.rotateAccel * dt;
+  lander.spin += Math.max(-maxDelta, Math.min(maxDelta, targetSpin - lander.spin));
+  lander.angle += lander.spin * dt;
+  // Keep angle in (-π, π]
+  lander.angle = Math.atan2(Math.sin(lander.angle), Math.cos(lander.angle));
+  if (rotL || rotR){
+    lander.fuel = Math.max(0, lander.fuel - F.rcsBurn*dt);
+    if (now - lastSideSound > 140){ playThrust(260, 0.05); lastSideSound = now; }
+  }
+
+  // Main engine pushes along the ship's "up"
+  const mainOn = hasFuel && !!(keys["ArrowUp"] || keys["KeyW"]);
+  if (mainOn){
+    lander.vx += Math.sin(lander.angle) * P.thrust*dt;
+    lander.vy -= Math.cos(lander.angle) * P.thrust*dt;
     lander.fuel = Math.max(0, lander.fuel - F.mainBurn*dt);
-    mainOn = true;
     if (now - lastMainSound > 90){ playThrust(110, 0.12); lastMainSound = now; }
   }
-  // Inverted horizontal: Left => move right, left engine fires (exhaust left)
-  if (keys["ArrowLeft"] && lander.fuel > 0){
-    lander.vx += P.sideThrust*dt;
-    lander.fuel = Math.max(0, lander.fuel - F.sideBurn*dt);
-    leftOn = true;
-    if (now - lastSideSound > 120){ playThrust(220, 0.08); lastSideSound = now; }
-  }
-  // Right => move left, right engine fires (exhaust right)
-  if (keys["ArrowRight"] && lander.fuel > 0){
-    lander.vx -= P.sideThrust*dt;
-    lander.fuel = Math.max(0, lander.fuel - F.sideBurn*dt);
-    rightOn = true;
-    if (now - lastSideSound > 120){ playThrust(220, 0.08); lastSideSound = now; }
-  }
 
-  // Emit thruster particles
-  emitThruster(dt, mainOn, leftOn, rightOn);
+  emitThruster(dt, mainOn, rotL, rotR);
 
   // Gravity and integrate
   lander.vy += P.gravity*dt;
   lander.x += lander.vx*dt;
   lander.y += lander.vy*dt;
 
-  // Bounds
+  // Bounds: walls at the sides, a soft ceiling so the ship can't vanish off the top
   if (lander.x < 10){ lander.x = 10; lander.vx = 0; }
   if (lander.x > W-10){ lander.x = W-10; lander.vx = 0; }
+  if (lander.y < SHIP_HALF_HEIGHT){ lander.y = SHIP_HALF_HEIGHT; lander.vy = Math.max(0, lander.vy); }
 
-  // Collision
-  const shipBottom = lander.y + SHIP_HALF_HEIGHT;
-  const onPadX = lander.x > PAD_X && lander.x < PAD_X + PAD_W;
+  // Collision: test both bottom corners of the hull
+  const footL = toWorld(-10, SHIP_HALF_HEIGHT), footR = toWorld(10, SHIP_HALF_HEIGHT);
+  const lowest = Math.max(footL.y, footR.y);
+  const inPad = x => x >= PAD_X && x <= PAD_X + PAD_W;
+  const onPad = inPad(footL.x) && inPad(footR.x);
+  const overPad = inPad(footL.x) || inPad(footR.x);
 
-  if ((shipBottom >= PAD_Y && onPadX) || shipBottom >= GROUND_Y){
+  if ((lowest >= PAD_Y && overPad) || lowest >= GROUND_Y){
     const L = CONFIG.landing;
-    const soft = (Math.abs(lander.vx) <= L.safeVx && lander.vy <= L.safeVy && onPadX);
+    const tilt = Math.abs(lander.angle) * 180 / Math.PI;
+    const soft = onPad && lander.vy <= L.safeVy && Math.abs(lander.vx) <= L.safeVx && tilt <= L.safeAngle;
     lander.touchdownVy = lander.vy;
     if (soft){
       setState("landed");
+      // Settle level on the pad
       lander.y = PAD_Y - SHIP_HALF_HEIGHT;
+      lander.angle = 0; lander.spin = 0;
     } else {
       setState("crashed");
-      lander.crashReason = !onPadX ? "Missed the pad"
+      lander.crashReason = !onPad ? (overPad ? "Hit the edge of the pad" : "Missed the pad")
         : lander.vy > L.safeVy ? `Too fast: ${lander.vy.toFixed(0)} px/s down`
+        : tilt > L.safeAngle ? `Not level: tilted ${tilt.toFixed(0)}°`
         : `Drifting sideways at ${Math.abs(lander.vx).toFixed(0)} px/s`;
     }
     // Dust kick-up at contact point
     const impact = Math.min(3.0, Math.hypot(lander.vx, lander.vy)/12 + (soft? 1.0 : 2.5));
-    const contactX = lander.x, contactY = Math.min(PAD_Y, GROUND_Y);
-    spawnDustBurst(contactX, contactY+2, 24 + Math.floor(impact*18), 1.2 + impact*0.8);
+    const contactY = overPad ? PAD_Y : GROUND_Y;
+    spawnDustBurst(lander.x, contactY+2, 24 + Math.floor(impact*18), 1.2 + impact*0.8);
   }
 }
 
@@ -590,6 +586,7 @@ function drawDebug(now){
     `fps ${dbg.fps}  steps/s ${dbg.sps}`,
     `x ${lander.x.toFixed(1)} y ${lander.y.toFixed(1)}`,
     `vx ${lander.vx.toFixed(1)} vy ${lander.vy.toFixed(1)}`,
+    `ang ${(lander.angle*180/Math.PI).toFixed(1)}° state ${game.state}`,
   ];
   ctx.save();
   ctx.font = "11px monospace"; ctx.textBaseline = "top"; ctx.textAlign = "left";
