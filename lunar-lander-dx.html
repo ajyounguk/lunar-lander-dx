@@ -8,7 +8,8 @@
   html, body { margin:0; height:100%; background:#000; overflow:hidden; overscroll-behavior:none;
     -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; -webkit-tap-highlight-color:transparent; }
   body { display:flex; align-items:center; justify-content:center; }
-  canvas { display:block; background:#000; touch-action:none; }
+  canvas { display:block; background:#000; touch-action:none;
+    position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); }
 </style>
 </head>
 <body>
@@ -243,8 +244,12 @@ function activeButtons(){
   return [];
 }
 function toLogical(e){
+  // Work from the canvas centre so the same maths covers the rotated layout
   const r = canvas.getBoundingClientRect();
-  return { x: (e.clientX - r.left) / r.width * W, y: (e.clientY - r.top) / r.height * H };
+  const dx = e.clientX - (r.left + r.width / 2), dy = e.clientY - (r.top + r.height / 2);
+  // Rotated 90° clockwise: screen (dx, dy) came from canvas (dy, -dx)
+  const lx = view.rotated ? dy : dx, ly = view.rotated ? -dx : dy;
+  return { x: (lx / view.cssW + 0.5) * W, y: (ly / view.cssH + 0.5) * H };
 }
 function buttonAt(p){
   // A little larger than drawn, so near-misses still count
@@ -256,7 +261,7 @@ function refreshTouch(){
 }
 window.addEventListener("pointerdown", e => {
   ensureAudio();
-  if (e.pointerType === "touch") touch.enabled = true;
+  if (e.pointerType === "touch" && !touch.enabled){ touch.enabled = true; resize(); }
   const btn = buttonAt(toLogical(e));
   if (btn === "pause"){ togglePause(); return; }
   if (btn === "quit"){ quitRun(); return; }
@@ -278,7 +283,6 @@ window.addEventListener("pointermove", e => {
 for (const type of ["pointerup", "pointercancel"]){
   window.addEventListener(type, e => { touch.pointers.delete(e.pointerId); refreshTouch(); });
 }
-const isPortrait = () => touch.enabled && window.innerHeight > window.innerWidth;
 
 /* === Audio: all synthesised with WebAudio. The context is created on the first
    key press or tap, since browsers block audio until the user interacts. === */
@@ -377,7 +381,7 @@ const toast = { text: "", life: 0 };
 function showToast(text){ toast.text = text; toast.life = 1.5; }
 
 /* === Display scaling: offscreen buffer + vignette at device-pixel resolution === */
-const view = { k: 1, pxW: W, pxH: H };   // k = device pixels per logical px
+const view = { k: 1, pxW: W, pxH: H, cssW: W, cssH: H, rotated: false };   // k = device pixels per logical px
 const buf = document.createElement("canvas"), bctx = buf.getContext("2d");
 const vignette = document.createElement("canvas"), vctx = vignette.getContext("2d");
 // Bloom is built at quarter resolution: blur is cheap there, and upscaling softens it further
@@ -394,9 +398,16 @@ function toggleCRT(){
 
 function resize(){
   const dpr = window.devicePixelRatio || 1;
-  const fit = Math.min(window.innerWidth / W, window.innerHeight / H);
+  // Touch device held upright (or with rotation lock on): draw the game turned 90°
+  // so the player just turns the phone sideways
+  view.rotated = touch.enabled && window.innerHeight > window.innerWidth;
+  const availW = view.rotated ? window.innerHeight : window.innerWidth;
+  const availH = view.rotated ? window.innerWidth : window.innerHeight;
+  const fit = Math.min(availW / W, availH / H);
   const cssW = Math.floor(W * fit), cssH = Math.floor(H * fit);
+  view.cssW = cssW; view.cssH = cssH;
   canvas.style.width = cssW + "px"; canvas.style.height = cssH + "px";
+  canvas.style.transform = `translate(-50%,-50%)${view.rotated ? " rotate(90deg)" : ""}`;
   view.pxW = Math.round(cssW * dpr); view.pxH = Math.round(cssH * dpr);
   view.k = view.pxW / W;
   for (const c of [canvas, buf, vignette]){ c.width = view.pxW; c.height = view.pxH; }
@@ -409,10 +420,7 @@ function resize(){
   grad.addColorStop(1, "rgba(0,0,0,0.55)");
   vctx.fillStyle = grad; vctx.fillRect(0,0,W,H);
 }
-window.addEventListener("resize", () => {
-  resize();
-  if (isPortrait() && game.state === "playing") setState("paused");
-});
+window.addEventListener("resize", resize);
 resize();
 
 /* === Camera: world → screen. Zooms in on the ship near the ground, like the arcade original === */
@@ -951,14 +959,6 @@ function drawTouchButtons(c){
   c.restore();
 }
 
-function drawPortraitHint(c){
-  c.save();
-  c.fillStyle = "rgba(0,0,0,0.88)"; c.fillRect(0, 0, W, H);
-  c.fillStyle = "#0f0"; c.textAlign = "center"; c.textBaseline = "middle";
-  c.font = "bold 56px monospace"; c.fillText("⟳", W/2, H/2 - 60);
-  c.font = "bold 40px monospace"; c.fillText("ROTATE TO LANDSCAPE", W/2, H/2 + 20);
-  c.restore();
-}
 
 function drawPopups(c){
   if (!run) return;
@@ -1092,7 +1092,6 @@ function renderSceneToBuffer(){
     bctx.fillStyle = "#0f0"; bctx.fillText(toast.text, W/2, H-63);
     bctx.restore();
   }
-  if (isPortrait()) drawPortraitHint(bctx);
 }
 
 /* === Post FX: bloom, vignette, scanlines, rounded border, title badge === */
