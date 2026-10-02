@@ -17,16 +17,37 @@
 const CONFIG = {
   physics: {
     stepHz: 120,          // fixed simulation rate, independent of screen refresh
-    gravity: 14.4,        // px/s²
     thrust: 43.2,         // main engine, px/s²
     rotateSpeed: 2.6,     // max rotation rate, rad/s
     rotateAccel: 14,      // how quickly rotation reaches full rate, rad/s²
   },
   fuel: {
-    start: 400,
+    start: 700,           // fuel at the start of a run; it carries over between levels
+    max: 1000,            // tank size
     mainBurn: 24,         // units/s
     rcsBurn: 3,           // rotation jets, units/s
+    landingBase: 100,     // refuel on landing = landingBase + landingPerMult × pad multiplier
+    landingPerMult: 50,
+    crashPenalty: 80,     // extra fuel lost when you crash
+    minToFly: 40,         // below this after a crash, the game is over
   },
+  scoring: {
+    base: 100,            // points per landing, before the pad multiplier
+    gentleBonus: 50,      // up to this many extra for a slow touchdown
+    levelBonus: 50,       // up to this many extra for touching down perfectly upright
+  },
+  // Difficulty per level. Past the end of the table, the last row repeats with
+  // gravity and wind creeping up (see levelParams).
+  levels: [
+    { gravity: 14.4, wind: 0, padScale: 1.00 },
+    { gravity: 16,   wind: 2, padScale: 0.95 },
+    { gravity: 18,   wind: 4, padScale: 0.90 },
+    { gravity: 20,   wind: 5, padScale: 0.85 },
+    { gravity: 22,   wind: 6, padScale: 0.80 },
+  ],
+  // Wind is a sideways push in px/s². Keep it well under thrust × sin(safeAngle)
+  // (about 9 with the defaults), or you can't hold position while level enough to land.
+  maxWind: 8,
   landing: {
     safeVy: 54,           // max downward speed, px/s
     safeVx: 36,           // max sideways speed, px/s
@@ -62,16 +83,46 @@ const DEBUG = new URLSearchParams(location.search).has("debug");
 
 /* === Game state machine ===
    title → playing ⇄ paused
-   playing → landed | crashed → (Space) → playing */
+   playing → landed → (Space) → next level
+   playing → crashed → (Space) → retry same level, or gameover → (Space) → title */
 const game = { state: "title", stateTime: 0 };
 function setState(s){ game.state = s; game.stateTime = 0; }
 
+// One run = a sequence of levels sharing a score and a fuel tank
+let run = null, level = null;
+function levelParams(n){
+  const t = CONFIG.levels, extra = Math.max(0, n - t.length);
+  const row = t[Math.min(n, t.length) - 1];
+  return {
+    gravity: Math.min(30, row.gravity + extra),
+    wind: Math.min(CONFIG.maxWind, row.wind + extra * 0.5),
+    padScale: Math.max(0.6, row.padScale - extra * 0.02),
+  };
+}
+function startRun(){
+  run = { level: 1, score: 0, fuel: CONFIG.fuel.start, seed: (Math.random()*0xFFFFFFFF)>>>0, popups: [] };
+  startLevel();
+}
+function startLevel(){
+  // Same seed for a level, so a retry after a crash flies the same terrain
+  const seed = (run.seed + run.level * 7919) >>> 0;
+  level = levelParams(run.level);
+  // Wind direction comes from the level seed too
+  level.wind *= lcg(seed ^ 0xA5A5)() < 0.5 ? -1 : 1;
+  init(seed);
+  lander.fuel = run.fuel;
+  setState("playing");
+}
+
 function confirmPressed(){
-  if (game.state === "title") { init(); setState("playing"); }
-  else if (game.state === "paused") setState("playing");
-  // Short delay so a held/mashed key doesn't skip the result screen
-  else if ((game.state === "landed" || game.state === "crashed") && game.stateTime > 0.6) {
-    init(); setState("playing");
+  // Short delay on result screens so a held/mashed key doesn't skip them
+  const ready = game.stateTime > 0.6;
+  switch (game.state){
+    case "title": startRun(); break;
+    case "paused": setState("playing"); break;
+    case "landed": if (ready){ run.level++; startLevel(); } break;
+    case "crashed": if (ready){ run.over ? setState("gameover") : startLevel(); } break;
+    case "gameover": if (ready) setState("title"); break;
   }
 }
 function togglePause(){
@@ -154,7 +205,7 @@ const mountains=[
 ];
 
 /* === Terrain: midpoint-displacement ridge line with flattened landing pads === */
-function genTerrain(seed){
+function genTerrain(seed, padScale = 1){
   const T = CONFIG.terrain, rand = lcg(seed), n = T.segments, seg = W / n;
   // Heights in 0..1, built by recursive midpoint displacement
   const h = new Array(n+1);
@@ -170,7 +221,8 @@ function genTerrain(seed){
 
   // Place pads, narrowest (most valuable) first so it gets first pick of the deep spots
   const pads = [], used = [];
-  const specs = [...CONFIG.pads].sort((a, b) => a.width - b.width);
+  const specs = CONFIG.pads.map(p => ({ ...p, width: Math.max(30, p.width * padScale) }))
+    .sort((a, b) => a.width - b.width);
   for (const spec of specs){
     const span = Math.ceil(spec.width / seg);
     const free = i => i >= 3 && i + span <= n - 3 && used.every(([a, b]) => i + span + 4 < a || i > b + 4);
@@ -216,7 +268,7 @@ let thrusterParticles = [];
 let emitAccMain = 0, emitAccSideL = 0, emitAccSideR = 0;
 
 function init(seed = (Math.random()*0xFFFFFFFF)>>>0){
-  terrain = genTerrain(seed);
+  terrain = genTerrain(seed, level ? level.padScale : 1);
   lander = {
     x: W/2, y: CONFIG.start.y,
     vx: (Math.random()*2-1)*CONFIG.start.maxVx, vy: 0,
@@ -417,7 +469,7 @@ function drawGauge(c, x,y,r, value, min,max, label, col, safeRange, fuelMode=fal
   c.strokeStyle=col; c.beginPath(); c.moveTo(0,0);
   c.lineTo(Math.cos(a)*(r-10),Math.sin(a)*(r-10)); c.stroke();
   let hub=col;
-  if(fuelMode){ hub = value<20?"#f00":(value<50?"#ff0":"#0f0"); }
+  if(fuelMode){ const f = (value-min)/(max-min); hub = f<0.1?"#f00":(f<0.25?"#ff0":"#0f0"); }
   else if(safeRange && (value<safeRange.min||value>safeRange.max)){
     hub=(Math.floor(performance.now()/200)%2)?"#f00":"#800";
   }
@@ -429,13 +481,33 @@ function drawGauge(c, x,y,r, value, min,max, label, col, safeRange, fuelMode=fal
 
 function drawHUD(c){
   const safeVy = CONFIG.landing.safeVy;
-  drawGauge(c, W-120, 82, 26, Math.max(0, lander.fuel), 0, CONFIG.fuel.start, "FUEL", "#0f0", null, true);
+  drawGauge(c, W-120, 82, 26, Math.max(0, lander.fuel), 0, CONFIG.fuel.max, "FUEL", "#0f0", null, true);
   drawGauge(c, W-52, 82, 26, lander.vy, -180, 180, "V-VEL", "#ff0", {min:-safeVy, max:safeVy});
   // Controls + data
-  c.fillStyle="#0f0"; c.font="12px monospace"; c.textAlign="left"; c.textBaseline="alphabetic";
-  c.fillText("Up: thrust   Left/Right: rotate   P: pause", 24, 32);
+  c.fillStyle="#0f0"; c.font="bold 14px monospace"; c.textAlign="left"; c.textBaseline="alphabetic";
+  c.fillText(`LEVEL ${run.level}   SCORE ${String(run.score).padStart(6, "0")}`, 24, 36);
+  c.font="12px monospace";
   const deg = lander.angle * 180 / Math.PI;
-  c.fillText(`Fuel: ${Math.max(0, lander.fuel).toFixed(0)}   VX: ${lander.vx.toFixed(0)}   VY: ${lander.vy.toFixed(0)}   ANG: ${deg.toFixed(0)}°`, 24, 48);
+  c.fillText(`Fuel: ${Math.max(0, lander.fuel).toFixed(0)}   VX: ${lander.vx.toFixed(0)}   VY: ${lander.vy.toFixed(0)}   ANG: ${deg.toFixed(0)}°`, 24, 54);
+  if (level.wind){
+    const arrow = level.wind > 0 ? "→" : "←";
+    c.fillStyle = "#8cf";
+    c.fillText(`WIND ${arrow} ${Math.abs(level.wind).toFixed(0)}`, 24, 70);
+  }
+  c.fillStyle = "#0a0";
+  c.fillText("Up: thrust   Left/Right: rotate   P: pause", 24, H-24);
+}
+
+function drawPopups(c){
+  if (!run) return;
+  c.save();
+  c.font = "bold 16px monospace"; c.textAlign = "center"; c.textBaseline = "middle";
+  for (const p of run.popups){
+    c.globalAlpha = Math.min(1, p.life);
+    c.fillStyle = "#ff0";
+    c.fillText(p.text, p.x, p.y);
+  }
+  c.restore();
 }
 
 // Centred message panel for title / pause / result screens
@@ -459,11 +531,14 @@ function drawPanel(c, title, lines, titleColor="#0f0"){
 }
 
 function drawOverlay(c){
+  const ready = game.stateTime > 0.6;
   switch (game.state){
     case "title":
       drawPanel(c, "MOON LANDER DX", [
         "Land slowly and upright on a pad.",
-        "Narrow pads score more.",
+        "Narrow pads score more and refuel you more.",
+        "Fuel carries over. Run dry and it's game over.",
+        "",
         "Up / W: thrust   Left/Right or A/D: rotate",
         "P / Esc: pause",
         "",
@@ -473,16 +548,32 @@ function drawOverlay(c){
     case "paused":
       drawPanel(c, "PAUSED", ["", "> SPACE OR P TO RESUME"]);
       break;
-    case "landed":
-      drawPanel(c, "MISSION SUCCESS", [
-        `Touchdown at ${lander.vy.toFixed(0)} px/s`, "",
-        game.stateTime > 0.6 ? "> PRESS SPACE TO FLY AGAIN" : "",
+    case "landed": {
+      const r = run.last;
+      drawPanel(c, `LEVEL ${run.level} COMPLETE`, [
+        `x${r.mult} pad   +${r.points} points`,
+        `soft landing +${r.gentlePts}   level +${r.levelPts}   (×${r.mult})`,
+        `Refuelled +${r.refuel}  (tank ${run.fuel.toFixed(0)})`,
+        "",
+        ready ? "> PRESS SPACE FOR NEXT LEVEL" : "",
       ]);
       break;
+    }
     case "crashed":
       drawPanel(c, "MISSION FAILED", [
-        lander.crashReason || "", "",
-        game.stateTime > 0.6 ? "> PRESS SPACE TO RETRY" : "",
+        lander.crashReason || "",
+        `Crash penalty -${run.fuelLost.toFixed(0)} fuel  (tank ${run.fuel.toFixed(0)})`,
+        run.over ? "Not enough fuel to fly again." : "",
+        "",
+        ready ? (run.over ? "> PRESS SPACE" : "> PRESS SPACE TO RETRY") : "",
+      ], "#f44");
+      break;
+    case "gameover":
+      drawPanel(c, "GAME OVER", [
+        `Final score ${run.score}`,
+        `Reached level ${run.level}`,
+        "",
+        ready ? "> PRESS SPACE" : "",
       ], "#f44");
       break;
   }
@@ -504,10 +595,11 @@ function renderSceneToBuffer(){
   drawDust(bctx);                 // over ground, under lander
   if (game.state !== "crashed") drawLander(bctx);
   drawThrusterParticles(bctx);    // on top for glow
+  drawPopups(bctx);
   bctx.restore();
 
   // HUD pass (screen space)
-  if (game.state !== "title") drawHUD(bctx);
+  if (run && game.state !== "title" && game.state !== "gameover") drawHUD(bctx);
   drawOverlay(bctx);
 }
 
@@ -595,7 +687,8 @@ function update(dt){
   emitThruster(dt, mainOn, rotL, rotR);
 
   // Gravity and integrate
-  lander.vy += P.gravity*dt;
+  lander.vy += level.gravity*dt;
+  lander.vx += level.wind*dt;
   lander.x += lander.vx*dt;
   lander.y += lander.vy*dt;
 
@@ -622,16 +715,40 @@ function update(dt){
     // Settle level on the pad
     lander.y = pad.y - SHIP_HALF_HEIGHT;
     lander.angle = 0; lander.spin = 0;
+    scoreLanding(pad, lander.touchdownVy, tilt);
   } else {
     setState("crashed");
     lander.crashReason = !pad ? (padL || padR ? "Hit the edge of the pad" : "Crashed into the terrain")
       : lander.vy > L.safeVy ? `Too fast: ${lander.vy.toFixed(0)} px/s down`
       : tilt > L.safeAngle ? `Not level: tilted ${tilt.toFixed(0)}°`
       : `Drifting sideways at ${Math.abs(lander.vx).toFixed(0)} px/s`;
+    const F = CONFIG.fuel;
+    run.fuelLost = Math.min(lander.fuel, F.crashPenalty);
+    run.fuel = Math.max(0, lander.fuel - F.crashPenalty);
+    run.over = run.fuel < F.minToFly;
   }
   // Dust kick-up at contact point
   const impact = Math.min(3.0, Math.hypot(lander.vx, lander.vy)/12 + (soft? 1.0 : 2.5));
   spawnDustBurst(lander.x, surfaceY(lander.x)+1, 24 + Math.floor(impact*18), 1.2 + impact*0.8);
+}
+
+function scoreLanding(pad, vy, tilt){
+  const S = CONFIG.scoring, F = CONFIG.fuel, L = CONFIG.landing;
+  const gentle = Math.max(0, 1 - Math.max(0, vy) / L.safeVy);
+  const upright = Math.max(0, 1 - tilt / L.safeAngle);
+  const gentlePts = Math.round(S.gentleBonus * gentle), levelPts = Math.round(S.levelBonus * upright);
+  const points = pad.mult * (S.base + gentlePts + levelPts);
+  const refuel = F.landingBase + F.landingPerMult * pad.mult;
+  run.score += points;
+  run.fuel = Math.min(F.max, lander.fuel + refuel);
+  run.last = { points, refuel, gentlePts, levelPts, mult: pad.mult };
+  run.popups.push({ text: `+${points}`, x: (pad.x0 + pad.x1) / 2, y: pad.y - 30, life: 1.6 });
+}
+
+function updatePopups(dt){
+  if (!run) return;
+  for (const p of run.popups){ p.y -= 18*dt; p.life -= dt; }
+  run.popups = run.popups.filter(p => p.life > 0);
 }
 
 function step(dt){
@@ -640,6 +757,7 @@ function step(dt){
   if (game.state === "playing") update(dt);
   updateDust(dt);
   updateThrusterParticles(dt);
+  updatePopups(dt);
 }
 
 /* === Frame loop: fixed-timestep simulation, render once per display frame === */
@@ -673,6 +791,7 @@ function drawDebug(now){
     `x ${lander.x.toFixed(1)} y ${lander.y.toFixed(1)}`,
     `vx ${lander.vx.toFixed(1)} vy ${lander.vy.toFixed(1)}`,
     `ang ${(lander.angle*180/Math.PI).toFixed(1)}° state ${game.state}`,
+    level ? `g ${level.gravity.toFixed(1)} wind ${level.wind.toFixed(1)} pads×${level.padScale.toFixed(2)}` : "",
   ];
   ctx.save();
   ctx.setTransform(view.k,0,0,view.k,0,0);
