@@ -3,12 +3,15 @@
 A retro, shareware-style lunar lander in a single HTML file: green-phosphor vector graphics, CRT glow,
 generated terrain, and a fuel tank that has to last the whole run.
 
-<h2 align="center"><a href="https://ajyounguk.github.io/lunar-lander-dx/">▶ Play it in your browser</a></h2>
+<p align="center">
+  <a href="https://ajyounguk.github.io/lunar-lander-dx/"><img alt="Play it in your browser" height="44"
+    src="https://img.shields.io/badge/%E2%96%B6%20PLAY-IN%20YOUR%20BROWSER-00cc00?style=for-the-badge&labelColor=000000"></a>
+</p>
 
 No install, no build step, no dependencies. Play it online, or download `lunar-lander-dx.html`
 and open it in a browser. It works on desktop and on phones/tablets (landscape).
 
-[![Coming in to land on a x2 pad, with the camera zoomed in and the HUD showing LANDING OK](docs/screenshots/landing.png)](https://ajyounguk.github.io/lunar-lander-dx/)
+![Coming in to land on a x2 pad, with the camera zoomed in and the HUD showing LANDING OK](docs/screenshots/landing.png)
 
 | | |
 |---|---|
