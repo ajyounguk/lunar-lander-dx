@@ -60,6 +60,110 @@ points for each bonus. The top five scores are saved in your browser.
 - Responsive, high-DPI canvas with touch controls
 - CRT bloom and scanlines, which you can switch off for performance
 
+## How it works
+
+The whole game is one HTML file of about 1,400 lines: a `<canvas>`, a little CSS, and one script.
+It uses only standard browser APIs (Canvas 2D, Web Audio, Pointer Events, localStorage), with no
+libraries, frameworks or external assets.
+
+### Game loop
+
+`requestAnimationFrame` drives rendering. The simulation runs on a **fixed 120Hz timestep**: each
+display frame adds the elapsed real time to an accumulator, and the loop runs as many physics steps as
+fit. As a result, the ship handles the same on 60Hz and 144Hz screens. Slow motion just scales the
+time fed into the accumulator. After a stall, such as switching tabs, catch-up is capped at 0.25 s.
+
+```mermaid
+flowchart LR
+    RAF["requestAnimationFrame"] --> ACC["accumulator += real time × timeScale"]
+    ACC --> LOOP{"accumulator ≥ 1/120 s?"}
+    LOOP -- yes --> STEP["step(): input → physics → collision<br/>particles, debris, camera"]
+    STEP --> LOOP
+    LOOP -- no --> RENDER["render frame"]
+    RENDER --> RAF
+```
+
+### Game states
+
+A small state machine decides what updates and what's drawn. A run is a sequence of levels that
+share a score and a fuel tank. Each level is generated from a seed, so a retry after a crash flies
+the same terrain.
+
+```mermaid
+stateDiagram-v2
+    [*] --> title
+    title --> playing: Space / tap
+    playing --> paused: P, Esc, focus lost
+    paused --> playing: Space / P
+    paused --> gameover: Q
+    playing --> landed: soft touchdown
+    playing --> crashed: anything else
+    landed --> playing: next level (refuelled)
+    crashed --> playing: retry same level
+    crashed --> gameover: tank too low
+    gameover --> title
+```
+
+### Rendering pipeline
+
+Everything is drawn at a fixed **960×540 logical resolution**, scaled to fit the window and rendered
+at device-pixel resolution so it stays sharp on high-DPI screens.
+
+```mermaid
+flowchart TB
+    subgraph BUF["Back buffer"]
+        BG["Stars + distant ridges<br/>(screen space)"] --> WORLD["World pass, under the camera transform<br/>terrain, pads, dust, ship, debris, exhaust, score popups"]
+        WORLD --> HUD["HUD pass (screen space)<br/>flight data, gauges, panels, touch buttons"]
+    end
+    BUF --> TRAIL["Phosphor persistence<br/>max(new frame, faded previous frame)"]
+    TRAIL --> BLOOM["Bloom<br/>blurred at ¼ resolution, added back"]
+    BLOOM --> FX["Vignette + scanlines + border"]
+    FX --> SCREEN["Visible canvas"]
+```
+
+- **Camera:** a translate/scale transform on the world pass only. Below about 100 px of altitude it
+  eases to 2× zoom and follows the ship, clamped so it never shows past the edge of the level.
+- **CRT effect:** the persistence step keeps a separate canvas and composites each new frame with
+  `lighten`. Anything that moves leaves a short fading trail, while static pixels don't brighten.
+  Bloom is cheap because the blur runs on a quarter-size copy.
+
+### Terrain and collision
+
+- **Terrain** is a 128-segment ridge line made by midpoint displacement, using a seeded random
+  number generator. Three pads are flattened into it. The narrowest, ×5 pad takes the deepest spot,
+  and the ground either side is raised to form a valley.
+- **Collision** tests seven points on the ship (feet, knees, body corners, top of the cabin) against
+  the terrain line. A touchdown counts as a landing only if both feet are on the same pad and
+  vertical speed, sideways speed and tilt are all within the limits in `CONFIG.landing`.
+  Anything else is a crash, and the crash screen says which limit was broken.
+
+### Audio
+
+All sound is synthesised with Web Audio. Nothing is loaded from files. The audio context is
+created on the first key press or tap, because browsers block sound until the player interacts.
+
+```mermaid
+flowchart LR
+    NOISE["White noise buffer<br/>(2 s, generated once)"] --> LP["Low-pass filter"] --> EG["Engine gain"] --> MASTER["Master gain<br/>(M mutes)"]
+    OSC["46 Hz sine rumble"] --> RG["Rumble gain"] --> MASTER
+    SFX["One-shot effects<br/>RCS hiss, alarm, crash, landing chime"] --> MASTER
+    MASTER --> OUT["Speakers"]
+```
+
+The engine runs continuously at zero volume, and thrust fades its gain and filter cutoff up and
+down. The one-shot effects are short-lived oscillators or noise bursts with their own volume
+envelopes.
+
+### Input and storage
+
+- **Keyboard** state is tracked by `KeyboardEvent.code`, so it works the same on any keyboard
+  layout. Held keys are cleared when the window loses focus.
+- **Touch** uses Pointer Events. Each finger is mapped to an on-screen button, so you can rotate and
+  thrust at the same time and slide between the rotate buttons. Taps and clicks also advance menus.
+- **localStorage** holds the high-score table (`moonLanderDX.highScores`) and the mute and CRT
+  settings. Every read and write is wrapped in `try/catch`, so the game still runs when storage is
+  blocked or holds bad data.
+
 ## Tweaking
 
 All gameplay numbers are in the `CONFIG` object at the top of the script: gravity and wind per
