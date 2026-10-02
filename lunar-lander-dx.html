@@ -86,8 +86,8 @@ const CONFIG = {
     slowmoRecover: 1.2,   // how fast time returns to normal, per real second
     shakePx: 14,          // max screen shake offset
     debrisGravity: 70,    // debris falls faster than the ship so it stays near the crash
-    bloom: true,
-    scanlines: true,
+    crt: true,            // bloom + scanlines; C toggles it in game
+    bloomStrength: 0.22,
   },
 };
 
@@ -206,6 +206,7 @@ document.addEventListener("keydown", e => {
     if (e.code === "KeyP" || e.code === "Escape") togglePause();
     if (e.code === "KeyQ") quitRun();
     if (e.code === "KeyM") toggleMute();
+    if (e.code === "KeyC") toggleCRT();
   }
 });
 document.addEventListener("keyup", e => keys[e.code] = false);
@@ -376,6 +377,15 @@ function showToast(text){ toast.text = text; toast.life = 1.5; }
 const view = { k: 1, pxW: W, pxH: H };   // k = device pixels per logical px
 const buf = document.createElement("canvas"), bctx = buf.getContext("2d");
 const vignette = document.createElement("canvas"), vctx = vignette.getContext("2d");
+// Bloom is built at quarter resolution: blur is cheap there, and upscaling softens it further
+const bloom = document.createElement("canvas"), blctx = bloom.getContext("2d");
+const canFilter = (() => { const t = document.createElement("canvas").getContext("2d"); t.filter = "blur(1px)"; return t.filter === "blur(1px)"; })();
+try { const v = localStorage.getItem("moonLanderDX.crt"); if (v !== null) CONFIG.fx.crt = v === "1"; } catch {}
+function toggleCRT(){
+  CONFIG.fx.crt = !CONFIG.fx.crt;
+  try { localStorage.setItem("moonLanderDX.crt", CONFIG.fx.crt ? "1" : "0"); } catch {}
+  showToast(CONFIG.fx.crt ? "CRT EFFECT ON" : "CRT EFFECT OFF");
+}
 
 function resize(){
   const dpr = window.devicePixelRatio || 1;
@@ -385,6 +395,7 @@ function resize(){
   view.pxW = Math.round(cssW * dpr); view.pxH = Math.round(cssH * dpr);
   view.k = view.pxW / W;
   for (const c of [canvas, buf, vignette]){ c.width = view.pxW; c.height = view.pxH; }
+  bloom.width = Math.max(1, Math.round(view.pxW / 4)); bloom.height = Math.max(1, Math.round(view.pxH / 4));
 
   vctx.setTransform(view.k,0,0,view.k,0,0);
   const grad = vctx.createRadialGradient(W/2, H/2, Math.min(W,H)*0.2, W/2, H/2, Math.max(W,H)*0.75);
@@ -996,7 +1007,7 @@ function drawOverlay(c){
         "Fuel carries over. Run dry and it's game over.",
         "",
         ...(touch.enabled ? ["Left buttons: rotate   Right button: thrust"]
-          : ["Up / W: thrust   Left/Right or A/D: rotate", "P / Esc: pause   M: sound on/off"]),
+          : ["Up / W: thrust   Left/Right or A/D: rotate", "P / Esc: pause   M: sound   C: CRT effect"]),
         "",
         ...highScoreLines(),
         "> PRESS SPACE TO START",
@@ -1086,13 +1097,18 @@ function postFXDraw(){
   ctx.clearRect(0,0,view.pxW,view.pxH);
   ctx.drawImage(buf, 0, 0);
 
-  // Subtle bloom/bleed
-  if (CONFIG.fx.bloom){
+  // Phosphor glow: downscale, blur, add back on top
+  if (CONFIG.fx.crt){
+    blctx.setTransform(1,0,0,1,0,0);
+    blctx.clearRect(0, 0, bloom.width, bloom.height);
+    if (canFilter) blctx.filter = "blur(2px) brightness(1.3)";
+    blctx.drawImage(buf, 0, 0, bloom.width, bloom.height);
+    if (canFilter) blctx.filter = "none";
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
-    ctx.globalAlpha = 0.10;
-    ctx.filter = `blur(${(1.4*k).toFixed(1)}px) brightness(1.25)`;
-    ctx.drawImage(buf, 0, 0);
+    ctx.globalAlpha = CONFIG.fx.bloomStrength;
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(bloom, 0, 0, view.pxW, view.pxH);
     ctx.restore();
   }
 
@@ -1100,7 +1116,7 @@ function postFXDraw(){
 
   // Everything below is in logical units
   ctx.setTransform(k,0,0,k,0,0);
-  if (CONFIG.fx.scanlines){
+  if (CONFIG.fx.crt){
     const flicker = 0.04 + 0.015 * Math.sin(performance.now()*0.03);
     ctx.fillStyle = `rgba(0,0,0,${flicker})`;
     for (let y=0; y<H; y+=2) ctx.fillRect(0, y, W, 1);
