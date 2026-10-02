@@ -68,6 +68,9 @@ const CONFIG = {
     { width: 64, mult: 2 },
     { width: 38, mult: 5 },
   ],
+  audio: {
+    volume: 0.6,          // master volume, 0..1
+  },
   camera: {
     zoom: 2,              // close-up zoom near the ground
     zoomInAlt: 100,       // zoom in below this altitude (px above the ground)
@@ -114,7 +117,10 @@ const DEBUG = new URLSearchParams(location.search).has("debug");
    playing → landed → (Space) → next level
    playing → crashed → (Space) → retry same level, or gameover → (Space) → title */
 const game = { state: "title", stateTime: 0 };
-function setState(s){ game.state = s; game.stateTime = 0; }
+function setState(s){
+  game.state = s; game.stateTime = 0;
+  if (s !== "playing") setEngine(false);
+}
 
 /* === High scores: top 5 in localStorage. Storage can be blocked or throw
    (private mode, disabled site data), so the game never depends on it. === */
@@ -173,7 +179,7 @@ function confirmPressed(){
   // Short delay on result screens so a held/mashed key doesn't skip them
   const ready = game.stateTime > 0.6;
   switch (game.state){
-    case "title": startRun(); break;
+    case "title": sfx.blip(); startRun(); break;
     case "paused": setState("playing"); break;
     case "landed": if (ready){ run.level++; startLevel(); } break;
     case "crashed": if (ready){ run.over ? endRun() : startLevel(); } break;
@@ -193,12 +199,13 @@ const keys = Object.create(null);
 document.addEventListener("keydown", e => {
   if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].includes(e.code)) e.preventDefault();
   keys[e.code] = true;
+  ensureAudio();   // first input unlocks audio
   if (!e.repeat){
     if (e.code === "Space" || e.code === "Enter") confirmPressed();
     if (e.code === "KeyP" || e.code === "Escape") togglePause();
     if (e.code === "KeyQ") quitRun();
+    if (e.code === "KeyM") toggleMute();
   }
-  if (audioCtx.state === "suspended") audioCtx.resume(); // unlock audio
 });
 document.addEventListener("keyup", e => keys[e.code] = false);
 // Drop held keys and pause when the window loses focus, otherwise keys stay stuck down
@@ -209,17 +216,101 @@ function onFocusLost(){
 window.addEventListener("blur", onFocusLost);
 document.addEventListener("visibilitychange", () => { if (document.hidden) onFocusLost(); });
 
-/* === Audio (retro blips) === */
-const audioCtx = new (window.AudioContext||window.webkitAudioContext)();
-function playThrust(freq=110, dur=0.12){
-  const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
-  osc.type = "sawtooth"; osc.frequency.value = freq;
-  gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
-  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
-  osc.connect(gain).connect(audioCtx.destination);
-  osc.start(); osc.stop(audioCtx.currentTime + dur);
+/* === Audio: all synthesised with WebAudio. The context is created on the first
+   key press or tap, since browsers block audio until the user interacts. === */
+const sound = { ctx: null, master: null, noise: null, engine: null, muted: false, lastRcs: 0, alarmAt: 0 };
+try { sound.muted = localStorage.getItem("moonLanderDX.muted") === "1"; } catch {}
+
+function ensureAudio(){
+  if (sound.ctx){ if (sound.ctx.state === "suspended") sound.ctx.resume(); return; }
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  const a = sound.ctx = new AC();
+  sound.master = a.createGain();
+  sound.master.gain.value = sound.muted ? 0 : CONFIG.audio.volume;
+  sound.master.connect(a.destination);
+  // Two seconds of white noise, reused by every noise-based sound
+  const len = a.sampleRate * 2;
+  sound.noise = a.createBuffer(1, len, a.sampleRate);
+  const d = sound.noise.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+  // Engine: looping filtered noise plus a low rumble, both silent until thrust
+  const src = a.createBufferSource(); src.buffer = sound.noise; src.loop = true;
+  const filter = a.createBiquadFilter(); filter.type = "lowpass"; filter.frequency.value = 400;
+  const gain = a.createGain(); gain.gain.value = 0;
+  src.connect(filter).connect(gain).connect(sound.master); src.start();
+  const osc = a.createOscillator(); osc.type = "sine"; osc.frequency.value = 46;
+  const rumble = a.createGain(); rumble.gain.value = 0;
+  osc.connect(rumble).connect(sound.master); osc.start();
+  sound.engine = { gain, filter, rumble, on: false };
 }
-let lastMainSound = 0, lastSideSound = 0;
+
+function setEngine(on){
+  const e = sound.engine;
+  if (!e || e.on === on) return;
+  e.on = on;
+  const t = sound.ctx.currentTime, tc = on ? 0.03 : 0.08;
+  for (const p of [e.gain.gain, e.rumble.gain, e.filter.frequency]) p.cancelScheduledValues(t);
+  e.gain.gain.setTargetAtTime(on ? 0.5 : 0, t, tc);
+  e.rumble.gain.setTargetAtTime(on ? 0.3 : 0, t, tc);
+  e.filter.frequency.setTargetAtTime(on ? 900 : 400, t, tc);
+}
+
+function tone(freq, dur, type = "square", vol = 0.1, delay = 0, slideTo = 0){
+  if (!sound.ctx) return;
+  const a = sound.ctx, t = a.currentTime + delay;
+  const osc = a.createOscillator(), g = a.createGain();
+  osc.type = type; osc.frequency.setValueAtTime(freq, t);
+  if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  osc.connect(g).connect(sound.master);
+  osc.start(t); osc.stop(t + dur + 0.05);
+}
+
+function noiseBurst(dur, filterType, freq, vol, freqTo = 0){
+  if (!sound.ctx) return;
+  const a = sound.ctx, t = a.currentTime;
+  const src = a.createBufferSource(); src.buffer = sound.noise;
+  const f = a.createBiquadFilter(); f.type = filterType; f.frequency.setValueAtTime(freq, t);
+  if (freqTo) f.frequency.exponentialRampToValueAtTime(freqTo, t + dur);
+  const g = a.createGain();
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(f).connect(g).connect(sound.master);
+  src.start(t, Math.random()); src.stop(t + dur + 0.05);
+}
+
+const sfx = {
+  rcs(){
+    const now = performance.now();
+    if (now - sound.lastRcs < 120) return;
+    sound.lastRcs = now;
+    noiseBurst(0.07, "highpass", 2500, 0.12);
+  },
+  alarm(){ tone(880, 0.09, "square", 0.07); tone(660, 0.09, "square", 0.07, 0.12); },
+  crash(){
+    noiseBurst(1.4, "lowpass", 1800, 0.9, 60);
+    tone(110, 0.9, "sine", 0.6, 0, 28);
+  },
+  land(){
+    tone(660, 0.14, "triangle", 0.22);
+    tone(990, 0.2, "triangle", 0.22, 0.1);
+    tone(1320, 0.35, "triangle", 0.2, 0.2);
+  },
+  blip(){ tone(520, 0.05, "square", 0.05); },
+};
+
+function toggleMute(){
+  sound.muted = !sound.muted;
+  try { localStorage.setItem("moonLanderDX.muted", sound.muted ? "1" : "0"); } catch {}
+  if (sound.master) sound.master.gain.setTargetAtTime(sound.muted ? 0 : CONFIG.audio.volume, sound.ctx.currentTime, 0.02);
+  showToast(sound.muted ? "SOUND OFF" : "SOUND ON");
+}
+
+// Short message in the middle of the screen (mute, CRT toggle)
+const toast = { text: "", life: 0 };
+function showToast(text){ toast.text = text; toast.life = 1.5; }
 
 /* === Display scaling: offscreen buffer + vignette at device-pixel resolution === */
 const view = { k: 1, pxW: W, pxH: H };   // k = device pixels per logical px
@@ -402,6 +493,7 @@ function explode(){
   }
   effects.shake = 1;
   effects.flash = 1;
+  sfx.crash();
   effects.timeScale = CONFIG.fx.crashSlowmo;
 }
 
@@ -409,6 +501,7 @@ function touchdownFx(pad, vy){
   // A small jolt that scales with how hard you came down
   effects.shake = Math.min(0.5, 0.12 + vy / CONFIG.landing.safeVy * 0.3);
   effects.timeScale = CONFIG.fx.landSlowmo;
+  sfx.land();
   for (const [fx] of SHIP.feet) spawnDustBurst(lander.x + fx, pad.y + 1, 30, 1.6);
 }
 
@@ -444,6 +537,7 @@ function drawDebris(c){
 
 // Shake and slow motion recover in real time, so they feel the same at any frame rate
 function updateEffects(realDt){
+  toast.life = Math.max(0, toast.life - realDt);
   effects.shake = Math.max(0, effects.shake - realDt * 1.6);
   effects.flash = Math.max(0, effects.flash - realDt * 4);
   effects.timeScale = Math.min(1, effects.timeScale + realDt * CONFIG.fx.slowmoRecover);
@@ -757,7 +851,7 @@ function drawHUD(c){
 }
 
 function controlHint(){
-  return "↑ / W: THRUST     ← → / A D: ROTATE     P: PAUSE";
+  return "↑ / W: THRUST     ← → / A D: ROTATE     P: PAUSE     M: SOUND";
 }
 
 function drawPopups(c){
@@ -811,7 +905,7 @@ function drawOverlay(c){
         "Fuel carries over. Run dry and it's game over.",
         "",
         "Up / W: thrust   Left/Right or A/D: rotate",
-        "P / Esc: pause",
+        "P / Esc: pause   M: sound on/off",
         "",
         ...highScoreLines(),
         "> PRESS SPACE TO START",
@@ -881,6 +975,14 @@ function renderSceneToBuffer(){
   // HUD pass (screen space)
   if (run && game.state !== "title" && game.state !== "gameover") drawHUD(bctx);
   drawOverlay(bctx);
+  if (toast.life > 0){
+    bctx.save();
+    bctx.globalAlpha = Math.min(1, toast.life * 2);
+    bctx.font = "bold 16px monospace"; bctx.textAlign = "center"; bctx.textBaseline = "middle";
+    bctx.fillStyle = "rgba(0,0,0,0.7)"; roundRectPath(bctx, W/2-90, H-78, 180, 30, 6); bctx.fill();
+    bctx.fillStyle = "#0f0"; bctx.fillText(toast.text, W/2, H-63);
+    bctx.restore();
+  }
 }
 
 /* === Post FX: bloom, vignette, scanlines, rounded border, title badge === */
@@ -952,7 +1054,7 @@ function update(dt){
   lander.angle = Math.atan2(Math.sin(lander.angle), Math.cos(lander.angle));
   if (rotL || rotR){
     lander.fuel = Math.max(0, lander.fuel - F.rcsBurn*dt);
-    if (now - lastSideSound > 140){ playThrust(260, 0.05); lastSideSound = now; }
+    sfx.rcs();
   }
 
   // Main engine pushes along the ship's "up"
@@ -961,7 +1063,10 @@ function update(dt){
     lander.vx += Math.sin(lander.angle) * P.thrust*dt;
     lander.vy -= Math.cos(lander.angle) * P.thrust*dt;
     lander.fuel = Math.max(0, lander.fuel - F.mainBurn*dt);
-    if (now - lastMainSound > 90){ playThrust(110, 0.12); lastMainSound = now; }
+  }
+  setEngine(mainOn);
+  if (lander.fuel > 0 && lander.fuel < F.lowWarning && now - sound.alarmAt > 700){
+    sfx.alarm(); sound.alarmAt = now;
   }
 
   lander.mainOn = mainOn;
@@ -1056,6 +1161,7 @@ function frame(now){
   const realDt = Math.min(MAX_FRAME, (now - lastTime) / 1000);
   lastTime = now;
   if (game.state !== "paused") updateEffects(realDt);
+  else toast.life = Math.max(0, toast.life - realDt);
   accumulator += realDt * effects.timeScale;
   while (accumulator >= STEP){
     step(STEP);
