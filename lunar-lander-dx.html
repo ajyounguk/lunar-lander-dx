@@ -41,17 +41,44 @@ const PAD_W = 60, PAD_H = 8, PAD_X = W/2 - PAD_W/2, PAD_Y = GROUND_Y - PAD_H;
 const SHIP_HALF_HEIGHT = 20;
 const DEBUG = new URLSearchParams(location.search).has("debug");
 
+/* === Game state machine ===
+   title → playing ⇄ paused
+   playing → landed | crashed → (Space) → playing */
+const game = { state: "title", stateTime: 0 };
+function setState(s){ game.state = s; game.stateTime = 0; }
+
+function confirmPressed(){
+  if (game.state === "title") { init(); setState("playing"); }
+  else if (game.state === "paused") setState("playing");
+  // Short delay so a held/mashed key doesn't skip the result screen
+  else if ((game.state === "landed" || game.state === "crashed") && game.stateTime > 0.6) {
+    init(); setState("playing");
+  }
+}
+function togglePause(){
+  if (game.state === "playing") setState("paused");
+  else if (game.state === "paused") setState("playing");
+}
+
 /* === Input === */
 const keys = Object.create(null);
 document.addEventListener("keydown", e => {
   if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].includes(e.code)) e.preventDefault();
   keys[e.code] = true;
-  if (e.code === "Space") init();        // reset always
+  if (!e.repeat){
+    if (e.code === "Space" || e.code === "Enter") confirmPressed();
+    if (e.code === "KeyP" || e.code === "Escape") togglePause();
+  }
   if (audioCtx.state === "suspended") audioCtx.resume(); // unlock audio
 });
 document.addEventListener("keyup", e => keys[e.code] = false);
-// Drop held keys when the window loses focus, otherwise they stay stuck down
-window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; });
+// Drop held keys and pause when the window loses focus, otherwise keys stay stuck down
+function onFocusLost(){
+  for (const k in keys) keys[k] = false;
+  if (game.state === "playing") setState("paused");
+}
+window.addEventListener("blur", onFocusLost);
+document.addEventListener("visibilitychange", () => { if (document.hidden) onFocusLost(); });
 
 /* === Audio (retro blips) === */
 const audioCtx = new (window.AudioContext||window.webkitAudioContext)();
@@ -90,7 +117,7 @@ const mountains=[
 let mountainOffsets=[0,0];
 
 /* === State === */
-let lander, endedOnce;
+let lander;
 let dust = [];
 let thrusterParticles = [];
 let emitAccMain = 0, emitAccSideL = 0, emitAccSideR = 0;
@@ -99,11 +126,10 @@ function init(){
   lander = {
     x: W/2, y: CONFIG.start.y,
     vx: (Math.random()*2-1)*CONFIG.start.maxVx, vy: 0,
-    fuel: CONFIG.fuel.start, alive: true, landed: false
+    fuel: CONFIG.fuel.start
   };
   dust.length = 0;
   thrusterParticles.length = 0;
-  endedOnce = false;
   emitAccMain = emitAccSideL = emitAccSideR = 0;
 }
 init();
@@ -334,12 +360,58 @@ function drawHUD(c){
   drawGauge(c, PAD_X-40, PAD_Y-30, 26, Math.max(0, lander.fuel), 0, CONFIG.fuel.start, "FUEL", "#0f0", null, true);
   drawGauge(c, PAD_X+PAD_W+40, PAD_Y-30, 26, lander.vy, -180, 180, "V-VEL", "#ff0", {min:-safeVy, max:safeVy});
   // Controls + data
-  c.fillStyle="#0f0"; c.font="12px monospace";
-  c.fillText("Arrows: thrust   Space: reset", 12, 18);
+  c.fillStyle="#0f0"; c.font="12px monospace"; c.textAlign="left"; c.textBaseline="alphabetic";
+  c.fillText("Arrows: thrust   P: pause", 12, 18);
   c.fillText(`Fuel: ${Math.max(0, lander.fuel).toFixed(0)}   VX: ${lander.vx.toFixed(0)}   VY: ${lander.vy.toFixed(0)}`, 12, 34);
-  // Outcome text
-  if(lander.landed) c.fillText("MISSION SUCCESS", W/2-60, H/2);
-  else if(!lander.alive) c.fillText("MISSION FAILED", W/2-60, H/2);
+}
+
+// Centred message panel for title / pause / result screens
+function drawPanel(c, title, lines, titleColor="#0f0"){
+  const blink = Math.floor(performance.now()/500) % 2 === 0;
+  const w = 340, h = 70 + lines.length*18, x = (W-w)/2, y = (H-h)/2 - 30;
+  c.save();
+  c.fillStyle = "rgba(0,12,0,0.82)"; drawRoundedRectFill(c, x, y, w, h, 8);
+  c.strokeStyle = "rgba(0,255,0,0.6)"; c.lineWidth = 2; drawRoundedRectStroke(c, x, y, w, h, 8);
+  c.textAlign = "center"; c.textBaseline = "top";
+  c.fillStyle = titleColor; c.font = "bold 22px monospace";
+  c.fillText(title, W/2, y+16);
+  c.font = "13px monospace";
+  lines.forEach((l, i) => {
+    const isPrompt = l.startsWith(">");
+    if (isPrompt && !blink) return;
+    c.fillStyle = isPrompt ? "#ff0" : "#0f0";
+    c.fillText(isPrompt ? l.slice(1).trim() : l, W/2, y+52+i*18);
+  });
+  c.restore();
+}
+
+function drawOverlay(c){
+  switch (game.state){
+    case "title":
+      drawPanel(c, "MOON LANDER DX", [
+        "Land softly on the pad.",
+        "Down: main engine   Left/Right: side jets",
+        "P / Esc: pause",
+        "",
+        "> PRESS SPACE TO START",
+      ]);
+      break;
+    case "paused":
+      drawPanel(c, "PAUSED", ["", "> SPACE OR P TO RESUME"]);
+      break;
+    case "landed":
+      drawPanel(c, "MISSION SUCCESS", [
+        `Touchdown at ${lander.vy.toFixed(0)} px/s`, "",
+        game.stateTime > 0.6 ? "> PRESS SPACE TO FLY AGAIN" : "",
+      ]);
+      break;
+    case "crashed":
+      drawPanel(c, "MISSION FAILED", [
+        lander.crashReason || "", "",
+        game.stateTime > 0.6 ? "> PRESS SPACE TO RETRY" : "",
+      ], "#f44");
+      break;
+  }
 }
 
 /* === Compose scene to back buffer === */
@@ -350,10 +422,11 @@ function renderSceneToBuffer(){
   drawPad(bctx);
   // Dust appears over ground, under lander
   drawDust(bctx);
-  if (lander.alive || lander.landed) drawLander(bctx);
+  if (game.state !== "crashed") drawLander(bctx);
   // Thruster particles on top for glow
   drawThrusterParticles(bctx);
-  drawHUD(bctx);
+  if (game.state !== "title") drawHUD(bctx);
+  drawOverlay(bctx);
 }
 
 /* === Post FX (no jitter): bloom, vignette, scanlines, rounded border, title badge === */
@@ -415,7 +488,6 @@ function updateBackground(dt){
 }
 
 function update(dt){
-  if (!lander.alive || lander.landed) return;
   const P = CONFIG.physics, F = CONFIG.fuel;
 
   const now = performance.now();
@@ -459,26 +531,30 @@ function update(dt){
   const shipBottom = lander.y + SHIP_HALF_HEIGHT;
   const onPadX = lander.x > PAD_X && lander.x < PAD_X + PAD_W;
 
-  if (!endedOnce && ((shipBottom >= PAD_Y && onPadX) || shipBottom >= GROUND_Y)){
+  if ((shipBottom >= PAD_Y && onPadX) || shipBottom >= GROUND_Y){
     const L = CONFIG.landing;
     const soft = (Math.abs(lander.vx) <= L.safeVx && lander.vy <= L.safeVy && onPadX);
+    lander.touchdownVy = lander.vy;
     if (soft){
-      lander.landed = true;
-      lander.vx = 0; lander.vy = 0;
+      setState("landed");
       lander.y = PAD_Y - SHIP_HALF_HEIGHT;
     } else {
-      lander.alive = false;
+      setState("crashed");
+      lander.crashReason = !onPadX ? "Missed the pad"
+        : lander.vy > L.safeVy ? `Too fast: ${lander.vy.toFixed(0)} px/s down`
+        : `Drifting sideways at ${Math.abs(lander.vx).toFixed(0)} px/s`;
     }
     // Dust kick-up at contact point
     const impact = Math.min(3.0, Math.hypot(lander.vx, lander.vy)/12 + (soft? 1.0 : 2.5));
     const contactX = lander.x, contactY = Math.min(PAD_Y, GROUND_Y);
     spawnDustBurst(contactX, contactY+2, 24 + Math.floor(impact*18), 1.2 + impact*0.8);
-    endedOnce = true;
   }
 }
 
 function step(dt){
-  update(dt);
+  if (game.state === "paused") return;
+  game.stateTime += dt;
+  if (game.state === "playing") update(dt);
   updateBackground(dt);
   updateDust(dt);
   updateThrusterParticles(dt);
