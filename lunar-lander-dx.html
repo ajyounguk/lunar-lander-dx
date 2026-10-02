@@ -67,6 +67,13 @@ const CONFIG = {
     { width: 64, mult: 2 },
     { width: 38, mult: 5 },
   ],
+  camera: {
+    zoom: 2,              // close-up zoom near the ground
+    zoomInAlt: 100,       // zoom in below this altitude (px above the ground)
+    zoomOutAlt: 150,      // and back out above this one
+    zoomSpeed: 3,         // how quickly zoom eases in/out
+    followSpeed: 6,       // how quickly the view follows the ship
+  },
   fx: {
     dustGravity: 0.12,
     crashSlowmo: 0.25,    // time scale right after a crash (recovers to 1)
@@ -236,8 +243,33 @@ function resize(){
 window.addEventListener("resize", resize);
 resize();
 
-/* === Camera: world → screen. Identity for now; zoom comes later === */
-const camera = { x: W/2, y: H/2, zoom: 1 };
+/* === Camera: world → screen. Zooms in on the ship near the ground, like the arcade original === */
+const camera = { x: W/2, y: H/2, zoom: 1, close: false };
+function resetCamera(){ Object.assign(camera, { x: W/2, y: H/2, zoom: 1, close: false }); }
+
+function updateCamera(dt){
+  const C = CONFIG.camera;
+  const flying = game.state === "playing" || game.state === "landed" || game.state === "crashed" || game.state === "paused";
+  if (flying && game.state === "playing"){
+    const alt = surfaceY(lander.x) - (lander.y + SHIP_HALF_HEIGHT);
+    if (!camera.close && alt < C.zoomInAlt) camera.close = true;
+    else if (camera.close && alt > C.zoomOutAlt) camera.close = false;
+  } else if (!flying) camera.close = false;
+
+  const ease = rate => 1 - Math.exp(-rate * dt);
+  camera.zoom += ((camera.close ? C.zoom : 1) - camera.zoom) * ease(C.zoomSpeed);
+  // Keep the view inside the world at the current zoom
+  const hw = W / (2 * camera.zoom), hh = H / (2 * camera.zoom);
+  const tx = camera.close ? lander.x : W/2, ty = camera.close ? lander.y + 30 : H/2;
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  camera.x += (clamp(tx, hw, W - hw) - camera.x) * ease(C.followSpeed);
+  camera.y += (clamp(ty, hh, H - hh) - camera.y) * ease(C.followSpeed);
+  // Snap the clamp too, so easing never shows past the world edge
+  camera.x = clamp(camera.x, hw, W - hw);
+  camera.y = clamp(camera.y, hh, H - hh);
+}
+// Line widths shrink a little when zoomed, so close-ups don't look chunky
+const lw = w => w / Math.sqrt(camera.zoom);
 function applyCamera(c){
   // Trauma-style shake: offset grows with the square of the shake amount
   const s = effects.shake * effects.shake * CONFIG.fx.shakePx;
@@ -335,6 +367,7 @@ function init(seed = (Math.random()*0xFFFFFFFF)>>>0){
   effects.shake = effects.flash = 0;
   effects.timeScale = 1;
   emitAccMain = emitAccSideL = emitAccSideR = 0;
+  resetCamera();
 }
 
 /* === Effects: screen shake, flash, slow motion, crash debris === */
@@ -398,7 +431,7 @@ function updateDebris(dt){
 
 function drawDebris(c){
   c.save();
-  c.strokeStyle = "#0f0"; c.lineWidth = 1.4; c.lineCap = "round";
+  c.strokeStyle = "#0f0"; c.lineWidth = lw(1.4); c.lineCap = "round";
   for (const d of debris){
     const cos = Math.cos(d.angle), sin = Math.sin(d.angle);
     const ex = d.hx * cos - d.hy * sin, ey = d.hx * sin + d.hy * cos;
@@ -545,7 +578,7 @@ function drawTerrain(c){
   for (const p of pts) c.lineTo(p.x, p.y);
   c.lineTo(W, H); c.closePath();
   c.fillStyle = "#010d01"; c.fill();
-  c.strokeStyle = "#0f0"; c.lineWidth = 1.5; c.lineJoin = "round";
+  c.strokeStyle = "#0f0"; c.lineWidth = lw(1.5); c.lineJoin = "round";
   c.beginPath();
   pts.forEach((p, i) => i ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y));
   c.stroke();
@@ -559,7 +592,7 @@ function drawPads(c){
       c.fillStyle = (i/8)%2 === 0 ? "#ff0" : "#000";
       c.fillRect(pad.x0+i, pad.y, Math.min(8, w-i), PAD_H);
     }
-    c.strokeStyle = "#0f0"; c.lineWidth = 2;
+    c.strokeStyle = "#0f0"; c.lineWidth = lw(2);
     c.strokeRect(pad.x0-1, pad.y-1, w+2, PAD_H+2);
     c.fillStyle = pad.mult >= 5 ? "#f80" : pad.mult >= 2 ? "#ff0" : "#0f0";
     c.font = "bold 12px monospace"; c.textAlign = "center"; c.textBaseline = "top";
@@ -578,7 +611,7 @@ function drawLander(c){
     c.beginPath(); c.moveTo(-4, 6); c.lineTo(4, 6); c.lineTo(6, 12); c.lineTo(-6, 12); c.closePath(); c.fill();
   }
 
-  c.strokeStyle = "#0f0"; c.lineWidth = 1.4;
+  c.strokeStyle = "#0f0"; c.lineWidth = lw(1.4);
   c.fillStyle = "#021a02";
   // Legs: strut from the body to each foot, plus a foot pad
   c.beginPath();
@@ -759,9 +792,9 @@ function renderSceneToBuffer(){
 
   // World pass
   bctx.setTransform(k,0,0,k,0,0);
+  drawBackground(bctx);           // distant stars and ridges: screen space, so they don't zoom
   bctx.save();
   applyCamera(bctx);
-  drawBackground(bctx);
   drawTerrain(bctx);
   drawPads(bctx);
   drawDust(bctx);                 // over ground, under lander
@@ -942,6 +975,7 @@ function step(dt){
   updateThrusterParticles(dt);
   updateDebris(dt);
   updatePopups(dt);
+  updateCamera(dt);
 }
 
 /* === Frame loop: fixed-timestep simulation, render once per display frame === */
@@ -976,7 +1010,7 @@ function drawDebug(now){
     `fps ${dbg.fps}  steps/s ${dbg.sps}`,
     `x ${lander.x.toFixed(1)} y ${lander.y.toFixed(1)}`,
     `vx ${lander.vx.toFixed(1)} vy ${lander.vy.toFixed(1)}`,
-    `ang ${(lander.angle*180/Math.PI).toFixed(1)}° state ${game.state}`,
+    `ang ${(lander.angle*180/Math.PI).toFixed(1)}° state ${game.state} zoom ${camera.zoom.toFixed(2)}`,
     level ? `g ${level.gravity.toFixed(1)} wind ${level.wind.toFixed(1)} pads×${level.padScale.toFixed(2)}` : "",
   ];
   ctx.save();
